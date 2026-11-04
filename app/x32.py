@@ -88,6 +88,15 @@ class X32:
             s[x32map.p_uout(i)] = 168 + ((i - 1) % 16) + 1
         for i in range(1, 9):
             s[x32map.p_aux_name(i)] = ""
+        for i in range(1, 17):
+            s[x32map.p_local_out("XLR", i)] = 3 + i  # Bus i
+        for i in range(1, 7):
+            s[x32map.p_local_out("AUXOUT", i)] = 0
+        for f in x32map.FADERS:
+            s[x32map.p_ins_sel(f)] = 0
+            s[x32map.p_ins_on(f)] = 0
+        for r, t in ((1, 0), (2, 10), (3, 28), (4, 38)):  # HALL, DLY, GEQ, LIM
+            s[x32map.p_fx_type(r)] = t
         s[x32map.p_ch_name(1)] = "Kick"
         s[x32map.p_ch_name(2)] = "Snare"
         self.info = "MOCK X32"
