@@ -113,6 +113,8 @@ class X32:
             s[x32map.p_ins_on(f)] = 0
         for r, t in ((1, 0), (2, 10), (3, 28), (4, 38)):  # HALL, DLY, GEQ, LIM
             s[x32map.p_fx_type(r)] = t
+        for r in range(5, 9):
+            s[x32map.p_fx_type(r)] = 0  # GEQ2
         s[x32map.p_ch_name(1)] = "Kick"
         s[x32map.p_ch_name(2)] = "Snare"
         self.info = "MOCK X32"

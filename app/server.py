@@ -304,7 +304,7 @@ def build_state():
             e = {}
             if d["insType"] == "FX":
                 rack = (n + 1) // 2
-                fi = M.fx_type_info(st.get(M.p_fx_type(rack)))
+                fi = M.fx_type_info(st.get(M.p_fx_type(rack)), rack)
                 e = {"fx": f"FX{rack} {fi['type']}", "warn": "" if fi["insertOk"] is not False
                      else f"FX{rack} has {fi['type']} loaded. That is a send-type effect, not an insert type."}
             else:
@@ -487,7 +487,7 @@ def route_insert(fader, dev_id, slot):
         notes = route_outboard_io(d, slot)
     else:
         rack = (d["insStart"] + slot) // 2
-        fi = M.fx_type_info(X.snapshot().get(M.p_fx_type(rack)))
+        fi = M.fx_type_info(X.snapshot().get(M.p_fx_type(rack)), rack)
         if fi["insertOk"] is False:
             notes.append(f"Warning: FX{rack} has {fi['type']} loaded (send-type effect). Load an insert-type effect.")
     return 200, {"ok": True, "msg": " · ".join([msg] + notes), "warn": any(n.startswith("Warning") for n in notes)}
@@ -575,9 +575,10 @@ def route_outboard_io(d, slot):
     """Route Aux Out N (send) and Aux In N (return) to the stage box jacks set for this slot."""
     n = d["insStart"] + slot - 1  # Aux number
     io = d["io"].get(str(slot), {})
-    # Not set = the unit is on the console's rear Aux Out N / Aux In N jacks
-    io = {"send": io.get("send") or f"@aux:{n}", "ret": io.get("ret") or f"@aux:{n}"}
+    # Internal Aux N and the rear Aux jacks are separate: no wiring set = route nothing, only set the insert.
     notes = []
+    if not io.get("send") and not io.get("ret"):
+        notes.append(f"wiring not set: route Aux Out {n} / Aux In {n} yourself, or set the jacks on the Devices tab")
     st = X.snapshot()
     # send: Aux Out N -> stage box output (needs a User Out output)
     sdev, sj = split_ref(io.get("send"))
@@ -589,7 +590,7 @@ def route_outboard_io(d, slot):
         elif od and od["outPort"] == "AUXOUT" and od["outStart"] + sj - 1 == n:
             notes.append(f"send on rear Aux Out {n}")
         else:
-            notes.append(f"Warning: send jack must be an AES50/Card/XLR output or rear Aux Out {n}.")
+            notes.append(f"Warning: send not routed. Aux {n} insert send can go to an AES50/Card output, an XLR Out on a User Out block, or rear Aux Out {n}.")
     # return: stage box input -> Aux In N
     rdev, rj = split_ref(io.get("ret"))
     if rdev:

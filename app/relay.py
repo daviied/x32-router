@@ -10,6 +10,7 @@
 import ipaddress
 import os
 import socket
+import struct
 import threading
 import time
 
@@ -68,7 +69,7 @@ class Relay:
         self.pending = {}        # addr -> {"clients": set, "t": time}
         self.node_q = []         # FIFO of (client, time) waiting for "node" replies
         self.subs = {}           # reply addr -> {"clients": {client: expiry}, "req": raw, "up": time}
-        self.stats = {"fromApps": 0, "toConsole": 0, "fromConsole": 0, "toApps": 0, "cacheHits": 0}
+        self.stats = {"fromApps": 0, "toConsole": 0, "fromConsole": 0, "toApps": 0, "cacheHits": 0, "pushes": 0}
 
     # ---------- lifecycle ----------
     def start(self):
@@ -126,9 +127,11 @@ class Relay:
         self.stats["toConsole"] += 1
 
     def _fanout(self, raw, exclude=None):
+        """Send a change to every active app. Apps that did not send /xremote get it too:
+        some (e.g. Mixing Station) subscribe in other ways, and an extra update is harmless."""
         now = time.time()
         for a, c in list(self.clients.items()):
-            if a != exclude and c["xremote"] > now:
+            if a != exclude and (c["xremote"] > now or now - c["seen"] < CLIENT_TIMEOUT):
                 self._to_app(a, raw)
 
     # ---------- apps -> relay ----------
@@ -146,6 +149,17 @@ class Relay:
                 pass
 
     def _from_app(self, client, data):
+        if data.startswith(b"#bundle\0"):
+            # OSC bundle: "#bundle", 8-byte time tag, then [int32 size][element] ...
+            i = 16
+            while i + 4 <= len(data):
+                n = struct.unpack(">i", data[i:i + 4])[0]
+                i += 4
+                if n <= 0 or i + n > len(data):
+                    break
+                self._from_app(client, data[i:i + n])
+                i += n
+            return
         now = time.time()
         self.stats["fromApps"] += 1
         with self.lock:
@@ -257,7 +271,9 @@ class Relay:
                     self.node_q.pop(0)
                 if self.node_q:
                     targets = [self.node_q.pop(0)[0]]
-                kind = "reply"
+                    kind = "reply"
+                else:
+                    kind = "push"  # unrequested node data = a console change
             elif addr in self.subs:
                 sub = self.subs[addr]
                 targets = [a for a, exp in sub["clients"].items() if exp > now]
@@ -270,16 +286,23 @@ class Relay:
                     self.cache[addr] = (raw, now)
                 if p:
                     targets = list(p["clients"])
-                    kind = "reply"
+                    kind = "reply+push" if changed and old else "reply"
                 elif changed:
                     kind = "push"
                 else:
                     return  # re-read with the same value: apps already have it
         if kind == "push":
+            self.stats["pushes"] += 1
             self._fanout(raw)
             return
         for a in targets:
             self._to_app(a, raw)
+        if kind == "reply+push":
+            self.stats["pushes"] += 1
+            now = time.time()
+            for a, c in list(self.clients.items()):
+                if a not in targets and (c["xremote"] > now or now - c["seen"] < CLIENT_TIMEOUT):
+                    self._to_app(a, raw)
 
     def _from_webapp(self, raw):
         """The web app changed routing: tell the mixing apps (the console does not echo it to us)."""

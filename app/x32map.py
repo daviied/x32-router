@@ -124,9 +124,9 @@ def p_local_out(port, n):
 
 
 # ---- Inserts: /ch/NN/insert/sel + /on (same under /auxin/NN) ----
-# sel: 0 Off, 1-8 FX1L FX1R .. FX4L FX4R, 9-14 Aux 1-6
+# sel: 0 Off, 1-16 FX1L FX1R .. FX8L FX8R, 17-22 Aux 1-6
 # POOL = outboard unit on stage box jacks; the app picks a free Aux (from the pool) on each insert.
-INS_TYPES = {"POOL": (9, 8), "AUX": (9, 6), "FX": (1, 8)}  # base value, max slots/channels
+INS_TYPES = {"POOL": (17, 8), "AUX": (17, 6), "FX": (1, 16)}  # base value, max slots/channels
 INS_TYPE_NAMES = {"POOL": "Outboard, auto Aux", "AUX": "Outboard on fixed Aux", "FX": "Internal FX"}
 AUX_COUNT = 6
 
@@ -136,10 +136,10 @@ def ins_value(typ, slot):
 
 
 def ins_from_value(v):
-    if v and 1 <= v <= 8:
+    if v and 1 <= v <= 16:
         return ("FX", v)
-    if v and 9 <= v <= 14:
-        return ("AUX", v - 8)
+    if v and 17 <= v <= 22:
+        return ("AUX", v - 16)
     return (None, 0)
 
 
@@ -152,9 +152,10 @@ def ins_label(v):
     return ""
 
 
-# ---- FX rack types: /fx/1..4/type ----
-# Values 0-26 are reverb / delay / modulation types (normally send FX).
-# Values 27+ are channel-processor types that work as inserts.
+# ---- FX rack types: /fx/1..8/type ----
+# FX1-4: values 0-26 are reverb / delay / modulation types (normally send FX),
+# values 27+ are channel-processor types that work as inserts.
+# FX5-8 hold insert types only; their list starts at GEQ2 (value 0 = FX_TYPES[27]).
 FX_TYPES = ["HALL", "AMBI", "RPLT", "ROOM", "CHAM", "PLAT", "VREV", "VRM", "GATE", "RVRS", "DLY", "3TAP",
             "4TAP", "CRS", "FLNG", "PHAS", "DIMC", "FILT", "ROTA", "PAN", "SUB", "D/RV", "CR/R", "FL/R",
             "D/CR", "D/FL", "MODD", "GEQ2", "GEQ", "TEQ2", "TEQ", "DES2", "DES", "P1A", "P1A2", "PQ5",
@@ -167,9 +168,12 @@ def p_fx_type(rack):
     return f"/fx/{rack}/type"
 
 
-def fx_type_info(v):
+def fx_type_info(v, rack=1):
     if v is None:
         return {"type": "?", "insertOk": None}
+    if rack >= 5:
+        i = FX_FIRST_INSERT + v
+        return {"type": FX_TYPES[i] if 0 <= i < len(FX_TYPES) else f"Type {v}", "insertOk": True}
     name = FX_TYPES[v] if 0 <= v < len(FX_TYPES) else f"Type {v}"
     return {"type": name, "insertOk": v >= FX_FIRST_INSERT}
 
@@ -343,7 +347,7 @@ def all_read_paths():
         paths += [p_local_out(port, i) for i in range(1, PORT_SIZE[port] + 1)]
     for f in FADERS:
         paths += [p_ins_sel(f), p_ins_on(f)]
-    paths += [p_fx_type(r) for r in range(1, 5)]
+    paths += [p_fx_type(r) for r in range(1, 9)]
     return paths
 
 
@@ -415,6 +419,6 @@ PRESETS = {
     "AUXIO": {**_BASE, "name": "X32 Aux I/O", "inPort": "AUX", "inCount": 6, "outPort": "AUXOUT", "outCount": 6, "cols": 6},
     "INS_POOL": {**_BASE, "kind": "insert", "name": "Outboard unit", "insType": "POOL", "insCount": 1},
     "INS_AUX": {**_BASE, "kind": "insert", "name": "Outboard on fixed Aux", "insType": "AUX", "insCount": 2},
-    "INS_FX": {**_BASE, "kind": "insert", "name": "Internal FX insert", "insType": "FX", "insCount": 8},
+    "INS_FX": {**_BASE, "kind": "insert", "name": "Internal FX insert", "insType": "FX", "insStart": 9, "insCount": 8},
     "CUSTOM": {**_BASE, "name": "Custom", "inCount": 8, "outPort": "A", "outCount": 8},
 }
