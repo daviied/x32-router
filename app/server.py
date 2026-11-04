@@ -4,6 +4,7 @@ import hmac
 import json
 import mimetypes
 import os
+import socket
 import secrets
 import threading
 import time
@@ -183,10 +184,31 @@ def allowed_block_paths():
     p.add(M.p_in_block("AUX"))
     for port in M.BLOCK_OUT_PORTS:
         p |= {M.p_out_block(port, b) for b in M.out_blocks(port)}
+    p |= {M.p_xlr_block(b) for b in M.XLR_BLOCKS}
     return p
 
 
 ALLOWED_BLOCKS = allowed_block_paths()
+
+
+class DualStackServer(ThreadingHTTPServer):
+    """Listen on IPv6 and IPv4. With IPv4 only, names that resolve to IPv6 first
+    (localhost, raspberrypi.local, an nginx upstream) waited ~2 s on every request."""
+    address_family = socket.AF_INET6
+    daemon_threads = True
+
+    def server_bind(self):
+        self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        super().server_bind()
+
+
+def make_server(port):
+    try:
+        return DualStackServer(("::", port), H)
+    except OSError:  # no IPv6 on this host
+        srv = ThreadingHTTPServer(("0.0.0.0", port), H)
+        srv.daemon_threads = True
+        return srv
 
 
 # ---------- state view ----------
@@ -270,6 +292,7 @@ def build_state():
         "aux": {"path": M.p_in_block("AUX"), "label": "Aux 1-6", "value": st.get(M.p_in_block("AUX"))},
         "out": {port: [{"path": M.p_out_block(port, b), "label": f"{M.PORT_NAMES[port]} Out {b}",
                         "value": st.get(M.p_out_block(port, b))} for b in M.out_blocks(port)] for port in M.BLOCK_OUT_PORTS},
+        "xlr": [{"path": M.p_xlr_block(b), "label": f"XLR Out {b}", "value": st.get(M.p_xlr_block(b))} for b in M.XLR_BLOCKS],
     }
     slot_info = {}
     for d in devices:
@@ -348,7 +371,7 @@ def ref_label(devices, ref, side):
 
 
 STATIC_META = {
-    "inOpts": M.in_block_options(), "auxOpts": M.aux_block_options(), "outOpts": M.out_block_options(),
+    "inOpts": M.in_block_options(), "auxOpts": M.aux_block_options(), "outOpts": M.out_block_options(), "xlrOpts": M.xlr_block_options(),
     "uoutSources": M.uout_source_groups(), "mixSources": M.mix_source_groups(),
     "presets": M.PRESETS, "portNames": M.PORT_NAMES, "portSize": M.PORT_SIZE,
     "inPorts": M.IN_PORTS, "outPorts": M.OUT_PORTS,
@@ -387,16 +410,16 @@ def route_output(dev_id, jack, source):
         return 400, {"error": "Bad device output"}
     m = d["outStart"] + jack - 1
     port = d["outPort"]
-    if port in M.LOCAL_OUT_PORTS:
+    r = M.resolve_dev_output(port, m, X.snapshot())
+    if r["kind"] == "MIX":
         if not (0 <= source <= M.MIX_MAX):
             return 400, {"error": "Bad source"}
-        X.set(M.p_local_out(port, m), source)
+        X.set(M.p_local_out(port, r["n"]), source)
         return 200, {"ok": True, "msg": f"{M.mix_label(source)} → {d['name']} Out {jack} ({M.PORT_NAMES[port]} {m})"}
     if not (0 <= source <= M.UOUT_MAX):
         return 400, {"error": "Bad source"}
-    r = M.resolve_dev_output(port, m, X.snapshot())
     if r["kind"] != "UOUT":
-        return 409, {"error": f"{M.PORT_NAMES[port]} Out {m} is not fed by a User Out. Set its block to User Out on the Blocks tab."}
+        return 409, {"error": f"{M.PORT_NAMES[port]} {m} is not fed by a User Out. Set its block to User Out on the Blocks tab."}
     X.set(M.p_uout(r["n"]), source)
     return 200, {"ok": True, "msg": f"{M.src_label(source)} → User Out {r['n']} → {d['name']} Out {jack}"}
 
@@ -415,7 +438,7 @@ def free_pool_aux(n, st):
         return
     sdev, sj = split_ref(d["io"].get(str(ch), {}).get("send"))
     od = get_dev(sdev) if sdev else None
-    if od and od["outPort"] in M.BLOCK_OUT_PORTS and 1 <= sj <= od["outCount"]:
+    if od and od["outPort"] != "AUXOUT" and 1 <= sj <= od["outCount"]:
         r = M.resolve_dev_output(od["outPort"], od["outStart"] + sj - 1, st)
         if r["kind"] == "UOUT" and r.get("src") == 200 + n:
             X.set(M.p_uout(r["n"]), 0)
@@ -469,12 +492,17 @@ def route_pool_insert(fader, d, ch):
     rdev, rj = split_ref(io.get("ret"))
     od = get_dev(sdev) if sdev else None
     idev = get_dev(rdev) if rdev else None
-    if not (od and od["outPort"] in M.BLOCK_OUT_PORTS and 1 <= sj <= od["outCount"]):
-        return 409, {"error": f"{uname}: set its send jack (an AES50 or Card output) on the Devices tab."}
-    if M.resolve_dev_output(od["outPort"], od["outStart"] + sj - 1, st)["kind"] != "UOUT":
-        return 409, {"error": f"{uname}: the send jack {od['name']} Out {sj} is not fed by a User Out block (Blocks tab)."}
+    if not (od and od["outPort"] and 1 <= sj <= od["outCount"]):
+        return 409, {"error": f"{uname}: set its send jack on the Devices tab."}
+    pinned = 0  # local Aux Out k carries the Aux k insert send itself: the unit must use Aux k
+    if od["outPort"] == "AUXOUT":
+        pinned = od["outStart"] + sj - 1
+    elif M.resolve_dev_output(od["outPort"], od["outStart"] + sj - 1, st)["kind"] != "UOUT":
+        hint = (f"set XLR Out block {M.XLR_BLOCKS[(od['outStart'] + sj - 2) // 4]} to User Out"
+                if od["outPort"] == "XLR" else "set its block to User Out")
+        return 409, {"error": f"{uname}: the send jack {od['name']} Out {sj} is not fed by a User Out. On the Blocks tab, {hint}."}
     if not (idev and 1 <= rj <= idev["inCount"]):
-        return 409, {"error": f"{uname}: set its return jack (a stage box input) on the Devices tab."}
+        return 409, {"error": f"{uname}: set its return jack on the Devices tab."}
 
     assign, use, pool = pool_assign(), aux_in_use(st), aux_pool()
     for k, u in assign.items():
@@ -485,8 +513,12 @@ def route_pool_insert(fader, d, ch):
     prev = next((int(k) for k, u in assign.items() if u == unit), 0)
     order = [n for n in [cur, prev] + pool if n]
     reasons, n = [], 0
+    if pinned:
+        order = [pinned]
     for cand in dict.fromkeys(order):
         if cand not in pool:
+            if pinned:
+                reasons.append(f"its send is local Aux Out {cand}, but Aux {cand} is not in the Aux pool")
             continue
         if cand in use and use[cand] != fader:
             reasons.append(f"Aux {cand} on {M.fader_label(use[cand])}")
@@ -513,9 +545,10 @@ def route_pool_insert(fader, d, ch):
     if not (kind == "UIN" and n <= c):
         X.set(M.p_in_block("AUX"), want)
         notes.append("Aux In block set to User In 1-6")
-    code, res = route_output(od["id"], sj, 200 + n)
-    if code != 200:
-        return code, res
+    if not pinned:
+        code, res = route_output(od["id"], sj, 200 + n)
+        if code != 200:
+            return code, res
     X.set(M.p_uin(n), M.src_value(idev["inPort"], idev["inStart"] + rj - 1))
     X.set(M.p_ins_sel(fader), M.ins_value("AUX", n))
     X.set(M.p_ins_on(fader), 1)
@@ -537,13 +570,13 @@ def route_outboard_io(d, slot):
     sdev, sj = split_ref(io.get("send"))
     if sdev:
         od = get_dev(sdev)
-        if od and od["outPort"] in M.BLOCK_OUT_PORTS and 1 <= sj <= od["outCount"]:
+        if od and od["outPort"] in M.BLOCK_OUT_PORTS + ("XLR",) and 1 <= sj <= od["outCount"]:
             code, res = route_output(sdev, sj, 200 + n)
             notes.append(f"send → {od['name']} Out {sj}" if code == 200 else "Warning: " + res["error"])
         elif od and od["outPort"] == "AUXOUT" and od["outStart"] + sj - 1 == n:
             notes.append(f"send on Aux Out {n}")
         else:
-            notes.append(f"Warning: send jack must be an AES50/Card output (or local Aux Out {n}).")
+            notes.append(f"Warning: send jack must be an AES50/Card/XLR output (or local Aux Out {n}).")
     # return: stage box input -> Aux In N
     rdev, rj = split_ref(io.get("ret"))
     if rdev:
@@ -761,11 +794,24 @@ class H(BaseHTTPRequestHandler):
                 if p not in ALLOWED_BLOCKS:
                     return self._json(400, {"error": "Bad block"})
                 limit = len(M.AUX_BLOCK_OPTS) if p.endswith("/AUX") else (
-                    len(M.IN_BLOCK_OPTS) if "/IN/" in p else len(M.OUT_BLOCK_OPTS))
+                    len(M.IN_BLOCK_OPTS) if "/IN/" in p else
+                    len(M.XLR_BLOCK_OPTS) if "/OUT/" in p else len(M.OUT_BLOCK_OPTS))
                 if not (0 <= v < limit):
                     return self._json(400, {"error": "Bad value"})
+                old = X.snapshot().get(p)
                 X.set(p, v)
-                return self._reply(200, {"ok": True})
+                note = ""
+                if "/OUT/" in p and old is not None and 0 <= old < len(M.XLR_BLOCK_OPTS):
+                    # XLR block Output x -> User Out y: keep the jacks' signal in empty User Outs
+                    (ok_, os_), (nk, ns) = M.XLR_BLOCK_OPTS[old], M.XLR_BLOCK_OPTS[v]
+                    if ok_ == "OUT" and nk == "UOUT":
+                        st, kept = X.snapshot(), 0
+                        for i in range(4):
+                            if not st.get(M.p_uout(ns + i)):
+                                X.set(M.p_uout(ns + i), 168 + os_ + i)
+                                kept += 1
+                        note = f"{kept} jack(s) keep Output {os_}-{os_ + 3} through User Out {ns}-{ns + 3}"
+                return self._reply(200, {"ok": True, "msg": note})
             if path == "/api/relay":
                 with cfg_lock:
                     rc = CFG.setdefault("relay", {"enabled": False, "name": "X32-Relay"})
@@ -793,4 +839,4 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     print(f"X32 Router on :{PORT}  X32={CFG.get('x32Ip') or '(not set)'}  mock={MOCK}", flush=True)
-    ThreadingHTTPServer(("0.0.0.0", PORT), H).serve_forever()
+    make_server(PORT).serve_forever()

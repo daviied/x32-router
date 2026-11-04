@@ -272,6 +272,31 @@ def out_block_slot_label(k, n):
     return f"{PORT_NAMES[k]} {n}"
 
 
+# ---- Local XLR Out blocks of 4: /config/routing/OUT/<block> ----
+# Order inferred from the 8-wide AES50/Card list (community docs). Check with X32-Edit:
+# a console at default should show "Output 1-4" ... "Output 13-16" here.
+XLR_BLOCK_OPTS = []
+for _k, _n in (("LOCAL", 32), ("A", 48), ("B", 48), ("CARD", 32), ("OUT", 16), ("P16", 16)):
+    XLR_BLOCK_OPTS += [(_k, i * 4 + 1) for i in range(_n // 4)]
+XLR_BLOCK_OPTS += [("AUXMON", 1), ("AUXMON", 5)]
+XLR_BLOCK_OPTS += [("UOUT", i * 4 + 1) for i in range(12)]
+XLR_BLOCKS = ["1-4", "5-8", "9-12", "13-16"]
+
+
+def xlr_block_label(k, s):
+    if k == "AUXMON":
+        return "Aux Out 1-4" if s == 1 else "Aux Out 5-6 / Mon"
+    return out_block_label(k, s).rsplit(" ", 1)[0] + f" {s}-{s + 3}"
+
+
+def xlr_block_options():
+    return [[i, xlr_block_label(k, s)] for i, (k, s) in enumerate(XLR_BLOCK_OPTS)]
+
+
+def p_xlr_block(b):
+    return f"/config/routing/OUT/{b}"
+
+
 # ---- Paths ----
 def p_in_block(b):
     return f"/config/routing/IN/{b}"
@@ -309,6 +334,7 @@ def all_read_paths():
     paths = [p_in_block(b) for b in IN_BLOCKS] + [p_in_block("AUX")]
     for port in BLOCK_OUT_PORTS:
         paths += [p_out_block(port, b) for b in out_blocks(port)]
+    paths += [p_xlr_block(b) for b in XLR_BLOCKS]
     paths += [p_uin(i) for i in range(1, 33)]
     paths += [p_uout(i) for i in range(1, 49)]
     paths += [p_ch_name(i) for i in range(1, 33)]
@@ -352,6 +378,17 @@ def resolve_fader(f, st):
 
 def resolve_dev_output(port, m, st):
     """What feeds physical output m on a port."""
+    if port == "XLR":
+        bv = st.get(p_xlr_block(XLR_BLOCKS[(m - 1) // 4]))
+        if bv is not None and 0 <= bv < len(XLR_BLOCK_OPTS):
+            kind, s = XLR_BLOCK_OPTS[bv]
+            n = s + (m - 1) % 4
+            if kind == "UOUT":
+                uv = st.get(p_uout(n))
+                return {"kind": "UOUT", "n": n, "src": uv, "label": src_label(uv)}
+            if kind != "OUT":
+                return {"kind": kind, "n": n, "label": out_block_slot_label(kind, n)}
+            m = n  # jack carries Output n
     if port in LOCAL_OUT_PORTS:
         v = st.get(p_local_out(port, m))
         return {"kind": "MIX", "n": m, "src": v, "label": mix_label(v)}

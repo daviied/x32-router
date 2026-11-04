@@ -28,10 +28,11 @@ async function api(path, body) {
 
 let lastState = "";
 function applyState(s) {
-  const txt = typeof s === "string" ? s : JSON.stringify(s);
+  const obj = typeof s === "string" ? JSON.parse(s) : s;
+  const txt = JSON.stringify(obj);  // same form for SSE text and reply objects
   if (txt === lastState) return;  // nothing changed: skip redraw
   lastState = txt;
-  S = typeof s === "string" ? JSON.parse(s) : s;
+  S = obj;
   render();
 }
 
@@ -509,24 +510,38 @@ function cablePath(p, q) {
 function drawCables() {
   const P = $("#patch"), svg = P.querySelector("svg.cables");
   if (!svg) return;
-  svg.setAttribute("width", P.scrollWidth); svg.setAttribute("height", P.scrollHeight);
-  svg.innerHTML = "";
-  patchCables().forEach((c, i) => {
-    const p = jackPos(c.a), q = jackPos(c.b);
+  // read phase: every jack position in one layout pass
+  const pr = P.getBoundingClientRect(), jacks = new Map(), pos = new Map();
+  P.querySelectorAll(".pj").forEach((b) => jacks.set(b.dataset.id, b));
+  const at = (id) => {
+    if (pos.has(id)) return pos.get(id);
+    const b = jacks.get(id), e = b && b.firstChild;
+    let v = null;
+    if (e) { const r = e.getBoundingClientRect(); v = { x: r.left - pr.left + r.width / 2, y: r.top - pr.top + r.height / 2 }; }
+    pos.set(id, v); return v;
+  };
+  const cables = patchCables(), fidx = new Map(S.faders.map((f, i) => [f.id, i]));
+  const items = cables.map((c) => [c, at(c.a), at(c.b)]);
+  const w = P.scrollWidth, h = P.scrollHeight;
+  // write phase
+  svg.setAttribute("width", w); svg.setAttribute("height", h);
+  const frag = document.createDocumentFragment();
+  P.querySelectorAll(".pj.on").forEach((b) => b.classList.remove("on"));
+  items.forEach(([c, p, q], i) => {
     if (!p || !q) return;
-    const col = CABLE_COLORS[(c.f ? S.faders.findIndex((f) => f.id === c.f) : i) % CABLE_COLORS.length];
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", cablePath(p, q));
-    path.setAttribute("stroke", col);
+    path.setAttribute("stroke", CABLE_COLORS[(c.f ? fidx.get(c.f) : i) % CABLE_COLORS.length]);
     path.classList.add("cable");
     path.onclick = () => unplugCable(c);
     const t = document.createElementNS("http://www.w3.org/2000/svg", "title");
     t.textContent = "Tap to unplug";
     path.append(t);
-    svg.append(path);
-    P.querySelector(`.pj[data-id="${c.a}"]`)?.classList.add("on");
-    P.querySelector(`.pj[data-id="${c.b}"]`)?.classList.add("on");
+    frag.append(path);
+    jacks.get(c.a)?.classList.add("on");
+    jacks.get(c.b)?.classList.add("on");
   });
+  svg.replaceChildren(frag);
 }
 window.addEventListener("resize", () => { if (mode === "patch") drawCables(); });
 ["#showIn", "#showOut", "#showIns"].forEach((s) => ($(s).onchange = () => renderPatch()));
@@ -596,11 +611,16 @@ $("#patch").addEventListener("pointerdown", (e) => {
   P.setPointerCapture(e.pointerId);
 });
 function dragMove() {
-  const pr = $("#patch").getBoundingClientRect();
-  drag.tmp.setAttribute("d", cablePath(drag.p, { x: drag.cx - pr.left, y: drag.cy - pr.top }));
-  document.querySelectorAll(".pj.over").forEach((x) => x.classList.remove("over"));
-  const t = jackAt(drag.cx, drag.cy);
-  if (t && t.dataset.id !== drag.id) t.classList.add("over");
+  if (!drag || drag.raf) return;
+  drag.raf = requestAnimationFrame(() => {
+    if (!drag) return;
+    drag.raf = 0;
+    const pr = $("#patch").getBoundingClientRect();
+    drag.tmp.setAttribute("d", cablePath(drag.p, { x: drag.cx - pr.left, y: drag.cy - pr.top }));
+    let t = jackAt(drag.cx, drag.cy);
+    if (t && t.dataset.id === drag.id) t = null;
+    if (t !== drag.over) { drag.over?.classList.remove("over"); t?.classList.add("over"); drag.over = t; }
+  });
 }
 $("#patch").addEventListener("pointermove", (e) => {
   if (!drag) return;
@@ -633,7 +653,7 @@ function blockSelect(b, opts) {
   for (const [v, t] of opts) s.append(new Option(t, v));
   s.value = b.value == null ? "" : String(b.value);
   s.onchange = async () => {
-    try { await api("/api/block", { path: b.path, value: Number(s.value) }); toast(`${b.label} → ${s.selectedOptions[0].text}`); }
+    try { const r = await api("/api/block", { path: b.path, value: Number(s.value) }); toast(`${b.label} → ${s.selectedOptions[0].text}${r.msg ? " · " + r.msg : ""}`); }
     catch (e) { toast(e.message, true); }
   };
   lab.append(s);
@@ -654,8 +674,13 @@ function renderBlocks() {
     for (const b of S.blocks.out[port]) g.append(blockSelect(b, META.outOpts));
     det.append(g); ob.append(det);
   }
-  const p = el("p", "note", "Local Out (XLR 1-16) and Aux Out 1-6 are patched one by one on the Route tab. They need no blocks.");
-  ob.append(p);
+  const det = el("details"); det.open = used.has("XLR");
+  det.append(el("summary", null, "Local XLR outputs (blocks of 4)"));
+  det.append(el("p", "note", "At Output 1-4 … 13-16 (default), Local Out jacks take Main/Bus/Matrix sources on the Route tab. Set a block to User Out to send any signal there, e.g. an outboard unit's insert send. Pick User Outs that AES50/Card blocks do not use (e.g. User Out 45-48); the jacks keep their current signal."));
+  const g = el("div", "blockgrid");
+  for (const b of S.blocks.xlr || []) g.append(blockSelect(b, META.xlrOpts));
+  det.append(g); ob.append(det);
+  ob.append(el("p", "note", "Aux Out 1-6 are patched one by one on the Route tab. They need no blocks."));
 }
 
 $("#allUin").onclick = async () => {
@@ -720,12 +745,12 @@ function drawDevices() {
 }
 
 function jackOptions(side, pooled) {
-  // side "out": AES50/Card (+ Aux Out for fixed slots); "in": any box input
+  // side "out": any box output (AES50, Card, XLR Out, Aux Out); "in": any box input
   const opts = [["", pooled ? "(not set)" : "Local Aux jack (no routing)"]];
   for (const b of devDraft.filter((x) => (x.kind || "box") === "box")) {
     const port = side === "out" ? b.outPort : b.inPort;
     const cnt = side === "out" ? b.outCount : b.inCount;
-    if (!port || !cnt || (side === "out" && (port === "XLR" || (pooled && port === "AUXOUT")))) continue;
+    if (!port || !cnt) continue;
     for (let j = 1; j <= cnt; j++) {
       const L = lbl(b, side, j);
       opts.push([`${b.id}:${j}`, `${b.name} ${side === "out" ? "Out" : "In"} ${j}${L ? " (" + L + ")" : ""}`]);
@@ -741,7 +766,7 @@ function ioEditor(d) {
   det.append(el("summary", null, "Outboard wiring (auto-routed on insert)"));
   const pooled = d.insType === "POOL";
   det.append(el("p", "note", pooled
-    ? "Where each unit is plugged in. Send = a stage box output (AES50/Card) that feeds the unit. Return = the stage box input the unit comes back on."
+    ? "Where each unit is plugged in. Send = the output that feeds the unit: AES50/Card, local XLR Out (its block of 4 must be on User Out) or local Aux Out (the unit then always uses that Aux). Return = any input: stage box, Local In or Aux In."
     : "Where the unit is plugged in. When you insert a slot, the app routes Aux Out (send) to the output jack and the input jack to Aux In (return). Leave blank if the unit uses the X32 rear Aux jacks."));
   const outs = jackOptions("out", pooled), ins = jackOptions("in", pooled);
   const g = el("div", "iogrid");

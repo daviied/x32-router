@@ -141,18 +141,10 @@ class Relay:
         if addr in ("/xremote", "/xremotenfb"):
             c["xremote"] = now + XREMOTE_TIME
             return
-        if addr == "/xinfo":
-            xa = self.x.xinfo_args
-            if self.x.connected and xa:
-                model, fw = str(xa[2]), str(xa[3])
-                self._to_app(client, osc_encode("/xinfo", _local_ip_for(client[0]), self.name, model, fw))
-            return
-        if addr in ("/info", "/status"):
-            hit = self.cache.get(addr)
-            if hit and self.x.connected:
-                self._to_app(client, hit[0])
-            else:
-                self._get(client, addr, data, now)
+        if addr in ("/xinfo", "/status", "/info"):
+            # Discovery / hello: answer as the relay, with the Pi's IP. The console's own reply
+            # carries the console IP, so apps listed the console and never the Pi.
+            self._to_app(client, self._hello(addr, client))
             return
         if addr in SUB_CMDS:
             self._subscribe(client, addr, args, data, now)
@@ -190,6 +182,17 @@ class Relay:
         if addr in self.x.relevant:
             self.x._store(addr, args[0])
         self._fanout(data, exclude=client)
+
+    def _hello(self, addr, client):
+        xa = self.x.xinfo_args or []
+        model = str(xa[2]) if len(xa) > 2 else "X32"
+        fw = str(xa[3]) if len(xa) > 3 else "4.06"
+        ip = _local_ip_for(client[0])
+        if addr == "/xinfo":
+            return osc_encode("/xinfo", ip, self.name, model, fw)
+        if addr == "/status":
+            return osc_encode("/status", "active", ip, self.name)
+        return osc_encode("/info", "V2.07", self.name, model, fw)
 
     def _get(self, client, addr, data, now):
         with self.lock:

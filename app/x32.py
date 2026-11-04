@@ -7,6 +7,11 @@ import time
 
 import x32map
 
+XREMOTE_EVERY = 5.0    # s between /xremote renewals (console timeout is 10 s)
+REREAD_TIME = 120.0    # s between safety re-reads of all routing values
+READBACK_DELAY = 0.5   # s after a set before it is read back
+STALE_WINDOW = 0.4     # s after a set in which a different reply counts as stale
+
 
 def _pad(b):
     return b + b"\0" * (4 - len(b) % 4)
@@ -70,6 +75,7 @@ class X32:
         self.listeners = []                    # fn(addr, args, raw) for every console packet (relay)
         self.local_listeners = []              # fn(raw) for every set made by this app (relay)
         self.relevant = set(x32map.all_read_paths())
+        self.recent = {}                       # addr -> (value, time) of our own recent sets
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", 0))
         self.sock.settimeout(1.0)
@@ -100,6 +106,8 @@ class X32:
             s[x32map.p_local_out("XLR", i)] = 3 + i  # Bus i
         for i in range(1, 7):
             s[x32map.p_local_out("AUXOUT", i)] = 0
+        for i, b in enumerate(x32map.XLR_BLOCKS):
+            s[x32map.p_xlr_block(b)] = x32map.XLR_BLOCK_OPTS.index(("OUT", i * 4 + 1))
         for f in x32map.FADERS:
             s[x32map.p_ins_sel(f)] = 0
             s[x32map.p_ins_on(f)] = 0
@@ -152,12 +160,15 @@ class X32:
 
     def set(self, addr, value):
         self.send(addr, value)
+        self.recent[addr] = (value, time.time())
         self._store(addr, value)
         raw = osc_encode(addr, value)
         for fn in list(self.local_listeners):
             fn(raw)
         if not self.mock:
-            self.send(addr)  # read back to confirm
+            # Read back later. The console can answer an instant read with the old value,
+            # which made the page jump back until the next click.
+            threading.Timer(READBACK_DELAY, self.send, (addr,)).start()
 
     def refresh(self):
         if self.mock:
@@ -194,7 +205,11 @@ class X32:
                 if not self.info.startswith(("X32", "M32")) or "fw" not in self.info:
                     self.info = " ".join(str(a) for a in args)
             elif args and addr in self.relevant:
-                self._store(addr, args[0])
+                r = self.recent.get(addr)
+                if r and time.time() - r[1] < STALE_WINDOW and args[0] != r[0]:
+                    pass  # old value from before our own set: ignore
+                else:
+                    self._store(addr, args[0])
             for fn in list(self.listeners):
                 try:
                     fn(addr, args, data)
@@ -205,18 +220,19 @@ class X32:
                 self.refresh()
 
     def _keepalive(self):
-        n = 0
+        """Stay connected like X32-Mix / X32-Edit: renew /xremote well inside its 10 s timeout."""
+        last_read = time.time()
         while True:
-            if not self.mock:
+            if not self.mock and self.ip:
                 was = self.connected
-                self.send("/xremote")   # subscribe to console changes (expires after 10 s)
-                self.send("/xinfo")
-                if n % 6 == 0:  # full re-read every ~48 s
-                    self._refresh()
+                self.send("/xremote")   # console pushes all changes to us for 10 s
+                self.send("/xinfo")     # keeps last_rx fresh (connection check)
+                if self.connected and time.time() - last_read > REREAD_TIME:
+                    last_read = time.time()
+                    self.refresh()      # safety re-read in its own thread (never delays /xremote)
                 if was and not self.connected:
                     self.bump()
-            n += 1
-            time.sleep(8)
+            time.sleep(XREMOTE_EVERY)
 
     def snapshot(self):
         with self.lock:
