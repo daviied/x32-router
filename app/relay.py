@@ -7,6 +7,8 @@
 - Console changes (desk, this web app) are copied to every app that sent /xremote.
 - Meter / subscription streams are requested once and copied to each app that asked.
 """
+import ipaddress
+import os
 import socket
 import threading
 import time
@@ -34,6 +36,22 @@ def _local_ip_for(peer_ip):
         return "0.0.0.0"
     finally:
         s.close()
+
+
+def net_check(peer_ip):
+    """Pi address the apps must use, and a warning when the container cannot be reached."""
+    ip = _local_ip_for(peer_ip or "192.168.1.1")
+    warn = ""
+    try:
+        a = ipaddress.ip_address(ip)
+        docker = os.path.exists("/.dockerenv")
+        if docker and a in ipaddress.ip_network("172.16.0.0/12"):
+            warn = (f"The container has the Docker address {ip}, so it is in bridge network mode. "
+                    "Apps on the LAN cannot reach UDP 10023 and console search cannot work. "
+                    "In CasaOS, set the app's Network to host (or use the compose file as is: network_mode: host), then restart it.")
+    except ValueError:
+        pass
+    return ip, warn
 
 
 class Relay:
@@ -83,12 +101,14 @@ class Relay:
             self.clients.clear(); self.cache.clear(); self.pending.clear(); self.subs.clear(); self.node_q.clear()
 
     def status(self):
+        lan, warn = net_check(self.x.ip)
         now = time.time()
         with self.lock:
             cl = [{"addr": f"{a[0]}:{a[1]}", "xremote": c["xremote"] > now, "idle": round(now - c["seen"], 1),
                    "rx": c["rx"], "tx": c["tx"]} for a, c in self.clients.items()]
             return {"running": self.running, "error": self.error, "port": self.port, "name": self.name,
-                    "clients": cl, "cached": len(self.cache), "subs": len(self.subs), "stats": dict(self.stats)}
+                    "clients": cl, "cached": len(self.cache), "subs": len(self.subs), "stats": dict(self.stats),
+                    "lanIp": lan, "netWarn": warn}
 
     # ---------- send helpers ----------
     def _to_app(self, client, raw):

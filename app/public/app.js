@@ -746,8 +746,8 @@ function drawDevices() {
 
 function jackOptions(side, pooled) {
   // side "out": any box output (AES50, Card, XLR Out, Aux Out); "in": any box input
-  const opts = [["", pooled ? "(not set)" : "Local Aux jack (no routing)"]];
-  for (const b of devDraft.filter((x) => (x.kind || "box") === "box")) {
+  const opts = [["", pooled ? "(not set)" : side === "out" ? "Rear Aux Out (same number)" : "Rear Aux In (same number)"]];
+  for (const b of [...META.consoleDevs, ...devDraft.filter((x) => (x.kind || "box") === "box")]) {
     const port = side === "out" ? b.outPort : b.inPort;
     const cnt = side === "out" ? b.outCount : b.inCount;
     if (!port || !cnt) continue;
@@ -767,7 +767,7 @@ function ioEditor(d) {
   const pooled = d.insType === "POOL";
   det.append(el("p", "note", pooled
     ? "Where each unit is plugged in. Send = the output that feeds the unit: AES50/Card, local XLR Out (its block of 4 must be on User Out) or local Aux Out (the unit then always uses that Aux). Return = any input: stage box, Local In or Aux In."
-    : "Where the unit is plugged in. When you insert a slot, the app routes Aux Out (send) to the output jack and the input jack to Aux In (return). Leave blank if the unit uses the X32 rear Aux jacks."));
+    : "Where the unit is plugged in. Default: the console's rear Aux Out N / Aux In N jacks. On insert, the app routes the send to the jack you pick, and the return jack to Aux N (through User In N when the Aux In block is on User In)."));
   const outs = jackOptions("out", pooled), ins = jackOptions("in", pooled);
   const g = el("div", "iogrid");
   for (let s = 1; s <= d.insCount; s++) {
@@ -915,8 +915,8 @@ function drawRelay(r) {
   if (!relayLoaded) { $("#relayOn").checked = r.running; $("#relayName").value = r.name; relayLoaded = true; }
   const st = r.stats;
   $("#relayStatus").textContent = r.running
-    ? `Running on UDP ${r.port}. ${r.clients.length} app(s). From apps ${st.fromApps} · to console ${st.toConsole} · cache hits ${st.cacheHits} · from console ${st.fromConsole} · to apps ${st.toApps}. Cached values ${r.cached}, shared streams ${r.subs}.`
-    : r.error ? `Off. ${r.error}` : "Off.";
+    ? `${r.netWarn ? "⚠ " + r.netWarn + " " : ""}Running on UDP ${r.port}. Point apps at ${r.lanIp}. ${r.clients.length} app(s). From apps ${st.fromApps} · to console ${st.toConsole} · cache hits ${st.cacheHits} · from console ${st.fromConsole} · to apps ${st.toApps}. Cached values ${r.cached}, shared streams ${r.subs}.`
+    : (r.error ? `Off. ${r.error}` : "Off.") + (r.netWarn ? " ⚠ " + r.netWarn : "");
   const L = $("#relayClients"); L.innerHTML = "";
   if (r.clients.length)
     L.append(table(["App address", "Live updates", "Idle (s)", "Packets in", "Packets out"],

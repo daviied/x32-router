@@ -363,15 +363,24 @@ def aux_use_view(st, devices):
 
 def ref_label(devices, ref, side):
     dev_id, j = split_ref(ref)
-    d = next((x for x in devices if x["id"] == dev_id), None)
+    d = next((x for x in devices if x["id"] == dev_id), None) or get_dev(dev_id)
     if not d:
         return ""
     lab = d["labels"].get(side, {}).get(str(j), "")
     return f"{d['name']} {'In' if side == 'in' else 'Out'} {j}" + (f" ({lab})" if lab else "")
 
 
+# The console's own rear jacks. Always there for insert wiring, no device needed.
+CONSOLE_DEVS = [
+    {"id": "@xlr", "name": "Console XLR", "kind": "box", "inPort": "LOCAL", "inStart": 1, "inCount": 32,
+     "outPort": "XLR", "outStart": 1, "outCount": 16},
+    {"id": "@aux", "name": "Console Aux", "kind": "box", "inPort": "AUX", "inStart": 1, "inCount": 6,
+     "outPort": "AUXOUT", "outStart": 1, "outCount": 6},
+]
+
+
 STATIC_META = {
-    "inOpts": M.in_block_options(), "auxOpts": M.aux_block_options(), "outOpts": M.out_block_options(), "xlrOpts": M.xlr_block_options(),
+    "inOpts": M.in_block_options(), "auxOpts": M.aux_block_options(), "outOpts": M.out_block_options(), "xlrOpts": M.xlr_block_options(), "consoleDevs": CONSOLE_DEVS,
     "uoutSources": M.uout_source_groups(), "mixSources": M.mix_source_groups(),
     "presets": M.PRESETS, "portNames": M.PORT_NAMES, "portSize": M.PORT_SIZE,
     "inPorts": M.IN_PORTS, "outPorts": M.OUT_PORTS,
@@ -380,7 +389,9 @@ STATIC_META = {
 
 
 def get_dev(dev_id):
-    return next((dev_defaults(x) for x in CFG["devices"] if x["id"] == dev_id), None)
+    d = next((x for x in CFG["devices"] if x["id"] == dev_id), None)
+    d = d or next((x for x in CONSOLE_DEVS if x["id"] == dev_id), None)
+    return dev_defaults(d) if d else None
 
 
 # ---------- routing actions ----------
@@ -564,6 +575,8 @@ def route_outboard_io(d, slot):
     """Route Aux Out N (send) and Aux In N (return) to the stage box jacks set for this slot."""
     n = d["insStart"] + slot - 1  # Aux number
     io = d["io"].get(str(slot), {})
+    # Not set = the unit is on the console's rear Aux Out N / Aux In N jacks
+    io = {"send": io.get("send") or f"@aux:{n}", "ret": io.get("ret") or f"@aux:{n}"}
     notes = []
     st = X.snapshot()
     # send: Aux Out N -> stage box output (needs a User Out output)
@@ -574,9 +587,9 @@ def route_outboard_io(d, slot):
             code, res = route_output(sdev, sj, 200 + n)
             notes.append(f"send → {od['name']} Out {sj}" if code == 200 else "Warning: " + res["error"])
         elif od and od["outPort"] == "AUXOUT" and od["outStart"] + sj - 1 == n:
-            notes.append(f"send on Aux Out {n}")
+            notes.append(f"send on rear Aux Out {n}")
         else:
-            notes.append(f"Warning: send jack must be an AES50/Card/XLR output (or local Aux Out {n}).")
+            notes.append(f"Warning: send jack must be an AES50/Card/XLR output or rear Aux Out {n}.")
     # return: stage box input -> Aux In N
     rdev, rj = split_ref(io.get("ret"))
     if rdev:
@@ -593,8 +606,9 @@ def route_outboard_io(d, slot):
                 users = [M.fader_label(f) for f in M.FADERS if f.startswith("ch")
                          and (r := M.resolve_fader(f, st))["kind"] == "UIN" and r["n"] == n]
                 if users:
-                    notes.append(f"Warning: return not routed. User In {n} feeds {', '.join(users)}. "
-                                 f"Move those channels to other User Ins, or plug the return into rear Aux In {n}.")
+                    notes.append(f"Warning: return not routed. Aux {n} returns through User In {n} "
+                                 f"(Aux In block is on User In), but User In {n} feeds {', '.join(users)}. "
+                                 f"Move those channels to other User Ins.")
                 else:
                     X.set(M.p_uin(n), M.src_value(port, pn))
                     notes.append(f"return ← {idev['name']} In {rj} via User In {n}")

@@ -11,7 +11,7 @@ Web app (PWA) for patching an X32 by stage box jack. Runs in Docker on a Raspber
    - AES50/Card outputs: Output 1-16, P16, Aux, Monitor, or any input (through User Out).
    - Local XLR Out 1-16 and Aux Out 1-6: Main, Bus, Matrix, direct outs, Monitor (sets `/outputs/main|aux/NN/src`).
    - **Unassign output** sets it to Off.
-5. **Route tab → Inserts**: click a fader, then an insert slot. Outboard insert slots use Aux Out N (send) + Aux In N (return). Internal FX slots use FX1L … FX4R. **Remove insert** turns it off.
+5. **Route tab → Inserts**: click a fader, then an insert slot. Outboard insert slots use Aux N: by default the console's rear Aux Out N (send) and Aux In N (return). If the Aux In block is on User In (Blocks tab), the app sets User In N = rear Aux In N on insert, so the return still comes from that jack. The console's rear jacks (XLR In 1-32, XLR Out 1-16, Aux In/Out 1-6) are always in the wiring lists; you do not need to add a device for them. Internal FX slots use FX1L … FX4R. **Remove insert** turns it off.
    - **FX insert** button (Inputs and Inserts modes): puts the next free insert slot on the selected fader.
    - **Outboard wiring** (Devices tab, outboard insert devices): set the stage box jacks the unit is plugged into. On insert, the app routes Aux Out N to the send jack (through User Out) and the return jack to Aux In N (through User In N, which needs the Aux In block set to User In 1-x). The app does not take a User In that a channel already uses; it warns you.
    - **Outboard units with auto Aux** (preset "Outboard unit"): add as many units as you have (e.g. 10). For each, set its send jack and return jack. Send: an AES50/Card output, a local XLR Out (its block of 4 must be on User Out, see below) or a local Aux Out (the unit then always uses that Aux number). Return: any input (stage box, Local In, Aux In). Insert a unit on a fader and the app picks a free Aux from the **Aux insert pool** (Devices tab, Aux 1-6 by default), routes Aux Out N → send jack (User Out), return jack → User In N → Aux In N, and sets the insert. Remove it and the Aux is free again (the unit's send jack is switched off). Up to 6 at a time (one per Aux). The Inserts view shows which unit is on which Aux.
@@ -45,6 +45,7 @@ The Pi and X32 must be on the same network. The compose file uses **host network
 - Scene / snippet / preset loads and copy commands clear the cache.
 
 Limits:
+- The container must use **host networking** (the compose file does). In bridge mode, apps cannot reach UDP 10023 and console search cannot work. The Settings tab shows a warning and the IP to use.
 - If the Pi or the container stops, the apps lose the console. Turn the relay off, or point the apps at the console IP, to go direct.
 - Rare file-type operations (show files, library transfers, firmware) are passed through but not tested. Use X32-Edit direct to the console for those.
 - Needs host networking (the compose file uses it) and free UDP port 10023 on the Pi (`RELAY_PORT` changes it, but most apps expect 10023).
