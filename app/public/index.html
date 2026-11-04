@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#16181d">
+<title>X32 Router</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="apple-touch-icon" href="/icons/icon-192.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="login" class="login hidden">
+  <form id="loginForm" class="card">
+    <h1>X32 Router</h1>
+    <input id="pw" type="password" placeholder="Password" autocomplete="current-password" required>
+    <button class="primary">Log in</button>
+    <p id="loginErr" class="err"></p>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <header>
+    <div class="brand"><span id="dot" class="dot"></span>X32 Router</div>
+    <nav id="tabs">
+      <button data-tab="route" class="on">Route</button>
+      <button data-tab="blocks">Blocks</button>
+      <button data-tab="devices">Devices</button>
+      <button data-tab="settings">Settings</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="tab-route" class="tab">
+      <div class="bar">
+        <div class="seg" id="mode">
+          <button data-mode="in" class="on">Inputs</button>
+          <button data-mode="out">Outputs</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="advance" checked> Auto-advance</label>
+        <div id="hint" class="hint"></div>
+      </div>
+      <div id="routeIn">
+        <h2>Faders</h2>
+        <div id="faders" class="faders"></div>
+        <h2>Stage boxes</h2>
+        <div id="boxesIn" class="boxes"></div>
+      </div>
+      <div id="routeOut" class="hidden">
+        <h2>Stage box outputs</h2>
+        <div id="boxesOut" class="boxes"></div>
+        <h2>Source</h2>
+        <div id="sources" class="sources"></div>
+      </div>
+    </section>
+
+    <section id="tab-blocks" class="tab hidden">
+      <p class="note">X32 routing is set in groups of 8. Set channel blocks to <b>User In</b> and output blocks to <b>User Out</b> so the Route tab can patch single channels.</p>
+      <h2>Fader input blocks</h2>
+      <div class="row"><button id="allUin">Set Ch 1-32 to User In 1-32</button></div>
+      <div id="inBlocks" class="blockgrid"></div>
+      <h2>Output blocks</h2>
+      <div id="outBlocks"></div>
+    </section>
+
+    <section id="tab-devices" class="tab hidden">
+      <div class="row">
+        <select id="newPreset"></select>
+        <button id="addDev" class="primary">Add device</button>
+      </div>
+      <div id="devList"></div>
+      <div class="row"><button id="saveDevs" class="primary">Save devices</button></div>
+    </section>
+
+    <section id="tab-settings" class="tab hidden">
+      <div class="card">
+        <label>X32 IP address <input id="ip" placeholder="192.168.1.50" inputmode="decimal"></label>
+        <div class="row"><button id="saveIp" class="primary">Save</button><button id="refresh">Re-read X32</button></div>
+        <p id="status"></p>
+      </div>
+      <div class="row"><button id="logout">Log out</button></div>
+    </section>
+  </main>
+  <div id="toast" class="toast"></div>
+</div>
+<script src="/app.js"></script>
+</body>
+</html>
