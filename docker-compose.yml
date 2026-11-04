@@ -4,13 +4,15 @@ services:
     image: ghcr.io/daviied/x32-router:latest
     container_name: x32-router
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    # Host networking lets "Find console" broadcast on your LAN (like X32-Edit).
+    # The app listens on PORT on the Pi itself. Dante is not affected.
+    network_mode: host
     environment:
       APP_PASSWORD: ${APP_PASSWORD}
       SESSION_SECRET: ${SESSION_SECRET}
       X32_IP: ${X32_IP:-}
       X32_MOCK: ${X32_MOCK:-0}
+      PORT: ${PORT:-8080}
     volumes:
       - /DATA/AppData/x32-router:/data
 x-casaos:

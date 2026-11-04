@@ -1,4 +1,5 @@
 """Minimal X32 OSC client (UDP 10023) with a state cache."""
+import os
 import socket
 import struct
 import threading
@@ -62,6 +63,13 @@ class X32:
         self.last_rx = 0.0
         self.info = ""
         self.lock = threading.Lock()
+        self.version = 0                       # bumps on every state change
+        self.changed = threading.Condition()   # notified on every bump
+        self.port = int(os.environ.get("X32_PORT", "10023"))
+        self.xinfo_args = None                 # last /xinfo reply from the console
+        self.listeners = []                    # fn(addr, args, raw) for every console packet (relay)
+        self.local_listeners = []              # fn(raw) for every set made by this app (relay)
+        self.relevant = set(x32map.all_read_paths())
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("0.0.0.0", 0))
         self.sock.settimeout(1.0)
@@ -100,6 +108,7 @@ class X32:
         s[x32map.p_ch_name(1)] = "Kick"
         s[x32map.p_ch_name(2)] = "Snare"
         self.info = "MOCK X32"
+        self.xinfo_args = ["127.0.0.1", "Mock X32", "X32", "4.06"]
 
     @property
     def connected(self):
@@ -112,21 +121,41 @@ class X32:
 
     def send(self, addr, *args):
         if self.mock:
-            if args:
-                with self.lock:
-                    self.state[addr] = args[0]
-            return
+            return  # set() stores the value
         if not self.ip:
             return
         try:
-            self.sock.sendto(osc_encode(addr, *args), (self.ip, 10023))
+            self.sock.sendto(osc_encode(addr, *args), (self.ip, self.port))
         except OSError:
             pass
 
+    def send_raw(self, data):
+        """Forward a client packet to the console as-is (relay)."""
+        if self.mock or not self.ip:
+            return
+        try:
+            self.sock.sendto(data, (self.ip, self.port))
+        except OSError:
+            pass
+
+    def bump(self):
+        with self.changed:
+            self.version += 1
+            self.changed.notify_all()
+
+    def _store(self, addr, value):
+        with self.lock:
+            same = self.state.get(addr) == value
+            self.state[addr] = value
+        if not same:
+            self.bump()
+
     def set(self, addr, value):
         self.send(addr, value)
-        with self.lock:
-            self.state[addr] = value
+        self._store(addr, value)
+        raw = osc_encode(addr, value)
+        for fn in list(self.local_listeners):
+            fn(raw)
         if not self.mock:
             self.send(addr)  # read back to confirm
 
@@ -136,6 +165,7 @@ class X32:
         threading.Thread(target=self._refresh, daemon=True).start()
 
     def _refresh(self):
+        self.send("/xinfo")
         self.send("/info")
         self.send("/xremote")
         for p in x32map.all_read_paths():
@@ -145,7 +175,7 @@ class X32:
     def _rx(self):
         while True:
             try:
-                data, _ = self.sock.recvfrom(4096)
+                data, _ = self.sock.recvfrom(65535)
             except socket.timeout:
                 continue
             except OSError:
@@ -157,25 +187,70 @@ class X32:
                 continue
             was = self.connected
             self.last_rx = time.time()
-            if addr == "/info":
-                self.info = " ".join(str(a) for a in args)
-            elif args:
-                with self.lock:
-                    self.state[addr] = args[0]
+            if addr == "/xinfo" and len(args) >= 4:
+                self.xinfo_args = args
+                self.info = f"{args[2]} \"{args[1]}\" fw {args[3]} at {args[0]}"
+            elif addr == "/info":
+                if not self.info.startswith(("X32", "M32")) or "fw" not in self.info:
+                    self.info = " ".join(str(a) for a in args)
+            elif args and addr in self.relevant:
+                self._store(addr, args[0])
+            for fn in list(self.listeners):
+                try:
+                    fn(addr, args, data)
+                except Exception:
+                    pass
             if not was:
+                self.bump()
                 self.refresh()
 
     def _keepalive(self):
         n = 0
         while True:
             if not self.mock:
-                self.send("/xremote")
-                self.send("/info")
+                was = self.connected
+                self.send("/xremote")   # subscribe to console changes (expires after 10 s)
+                self.send("/xinfo")
                 if n % 6 == 0:  # full re-read every ~48 s
                     self._refresh()
+                if was and not self.connected:
+                    self.bump()
             n += 1
             time.sleep(8)
 
     def snapshot(self):
         with self.lock:
             return dict(self.state)
+
+
+def discover(timeout=1.5):
+    """Find consoles like X32-Edit does: broadcast /xinfo on UDP 10023."""
+    targets = {"255.255.255.255"}
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            if not ip.startswith("127."):
+                targets.add(".".join(ip.split(".")[:3]) + ".255")
+    except OSError:
+        pass
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    s.bind(("0.0.0.0", 0))
+    s.settimeout(0.2)
+    for t in targets:
+        try:
+            s.sendto(osc_encode("/xinfo"), (t, 10023))
+        except OSError:
+            pass
+    found = {}
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            data, src = s.recvfrom(4096)
+            addr, args = osc_decode(data)
+        except (socket.timeout, OSError, ValueError):
+            continue
+        if addr == "/xinfo" and len(args) >= 4:
+            found[src[0]] = {"ip": src[0], "name": str(args[1]), "model": str(args[2]), "fw": str(args[3])}
+    s.close()
+    return list(found.values())

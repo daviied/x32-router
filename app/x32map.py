@@ -125,8 +125,10 @@ def p_local_out(port, n):
 
 # ---- Inserts: /ch/NN/insert/sel + /on (same under /auxin/NN) ----
 # sel: 0 Off, 1-8 FX1L FX1R .. FX4L FX4R, 9-14 Aux 1-6
-INS_TYPES = {"AUX": (9, 6), "FX": (1, 8)}  # base value, slot count
-INS_TYPE_NAMES = {"AUX": "Aux send/return", "FX": "Internal FX"}
+# POOL = outboard unit on stage box jacks; the app picks a free Aux (from the pool) on each insert.
+INS_TYPES = {"POOL": (9, 8), "AUX": (9, 6), "FX": (1, 8)}  # base value, max slots/channels
+INS_TYPE_NAMES = {"POOL": "Outboard, auto Aux", "AUX": "Outboard on fixed Aux", "FX": "Internal FX"}
+AUX_COUNT = 6
 
 
 def ins_value(typ, slot):
@@ -374,7 +376,8 @@ PRESETS = {
     "CARD": {**_BASE, "name": "Card", "inPort": "CARD", "inCount": 32, "outPort": "CARD", "outCount": 32},
     "LOCAL": {**_BASE, "name": "X32 Local", "inPort": "LOCAL", "inCount": 32, "outPort": "XLR", "outCount": 16},
     "AUXIO": {**_BASE, "name": "X32 Aux I/O", "inPort": "AUX", "inCount": 6, "outPort": "AUXOUT", "outCount": 6, "cols": 6},
-    "INS_AUX": {**_BASE, "kind": "insert", "name": "Outboard insert", "insType": "AUX", "insCount": 2},
+    "INS_POOL": {**_BASE, "kind": "insert", "name": "Outboard unit", "insType": "POOL", "insCount": 1},
+    "INS_AUX": {**_BASE, "kind": "insert", "name": "Outboard on fixed Aux", "insType": "AUX", "insCount": 2},
     "INS_FX": {**_BASE, "kind": "insert", "name": "Internal FX insert", "insType": "FX", "insCount": 8},
     "CUSTOM": {**_BASE, "name": "Custom", "inCount": 8, "outPort": "A", "outCount": 8},
 }

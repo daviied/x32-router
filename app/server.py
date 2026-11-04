@@ -13,7 +13,8 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import x32map as M
-from x32 import X32
+from x32 import X32, discover
+from relay import Relay
 
 ROOT = Path(__file__).parent
 PUBLIC = ROOT / "public"
@@ -49,6 +50,10 @@ def save_cfg(c):
 CFG = load_cfg()
 X = X32(CFG.get("x32Ip", ""), mock=MOCK)
 X.refresh()
+CFG.setdefault("relay", {"enabled": False, "name": "X32-Relay"})
+RELAY = Relay(X, port=int(os.environ.get("RELAY_PORT", "10023")), name=CFG["relay"].get("name") or "X32-Relay")
+if CFG["relay"].get("enabled"):
+    RELAY.start()
 
 # ---------- auth ----------
 def make_token():
@@ -100,7 +105,7 @@ def clean_device(d):
     kind = "insert" if d.get("kind") == "insert" else "box"
     ins_type = d.get("insType") if d.get("insType") in M.INS_TYPES else "AUX"
     ins_max = M.INS_TYPES[ins_type][1]
-    ins_start = i(d.get("insStart"), 1, ins_max, 1)
+    ins_start = 1 if ins_type == "POOL" else i(d.get("insStart"), 1, ins_max, 1)
     ins_count = i(d.get("insCount"), 0, ins_max - ins_start + 1, 0)
     if kind == "insert":
         in_count = out_count = 0
@@ -116,7 +121,7 @@ def clean_device(d):
         "insType": ins_type, "insStart": ins_start, "insCount": ins_count,
         "cols": i(d.get("cols"), 1, 16, 8),
         "labels": clean_labels(d.get("labels"), {"in": in_count, "out": out_count, "ins": ins_count}),
-        "io": clean_io(d.get("io"), ins_count) if kind == "insert" and ins_type == "AUX" else {},
+        "io": clean_io(d.get("io"), ins_count) if kind == "insert" and ins_type in ("AUX", "POOL") else {},
     }
 
 
@@ -236,7 +241,14 @@ def build_state():
         item["ins"] = M.ins_label(iv)
         item["insOn"] = bool(ion)
         t, n = M.ins_from_value(iv)
-        if t:
+        unit = pool_assign().get(str(n)) if t == "AUX" else None
+        pd, pch = split_ref(unit) if unit else (None, 0)
+        pdev = next((d for d in devices if d["id"] == pd and d["insType"] == "POOL"), None)
+        if pdev and 1 <= pch <= pdev["insCount"]:
+            item["ins"] = f"{pdev['name']} {pch} (Aux {n})" if pdev["insCount"] > 1 else f"{pdev['name']} (Aux {n})"
+            if ion:
+                slots[pdev["id"]].setdefault(pch, []).append(f)
+        elif t:
             for d in devices:
                 if d["kind"] == "insert" and d["insType"] == t and d["insStart"] <= n < d["insStart"] + d["insCount"]:
                     s = n - d["insStart"] + 1
@@ -275,13 +287,55 @@ def build_state():
             else:
                 io = d["io"].get(str(s), {})
                 e = {"send": ref_label(devices, io.get("send"), "out"), "ret": ref_label(devices, io.get("ret"), "in")}
+                if d["insType"] == "POOL":
+                    unit = f"{d['id']}:{s}"
+                    e["aux"] = next((int(k) for k, u in pool_assign().items() if u == unit and slots[d["id"]].get(s)), 0)
+                    if not (e["send"] and e["ret"]):
+                        e["warn"] = "Set the send and return jacks on the Devices tab."
             info[s] = e
         slot_info[d["id"]] = info
     return {
         "connected": X.connected, "info": X.info, "mock": MOCK, "x32Ip": ip,
         "devices": devices, "faders": faders, "jacksIn": jacks_in, "jacksOut": jacks_out,
         "slots": slots, "slotInfo": slot_info, "blocks": blocks,
+        "auxPool": aux_pool(), "auxUse": aux_use_view(st, devices),
     }
+
+
+def aux_pool():
+    return [n for n in CFG.get("auxPool", list(range(1, M.AUX_COUNT + 1))) if 1 <= n <= M.AUX_COUNT]
+
+
+def pool_assign():
+    return CFG.setdefault("auxAssign", {})
+
+
+def aux_in_use(st):
+    """Aux N -> fader using it as an insert (insert on)."""
+    use = {}
+    for f in M.FADERS:
+        t, n = M.ins_from_value(st.get(M.p_ins_sel(f)))
+        if t == "AUX" and st.get(M.p_ins_on(f)):
+            use.setdefault(n, f)
+    return use
+
+
+def uin_users(st, n):
+    return [M.fader_label(f) for f in M.FADERS if f.startswith("ch")
+            and (r := M.resolve_fader(f, st))["kind"] == "UIN" and r["n"] == n]
+
+
+def aux_use_view(st, devices):
+    use = aux_in_use(st)
+    out = []
+    for n in range(1, M.AUX_COUNT + 1):
+        unit = pool_assign().get(str(n))
+        dev_id, ch = split_ref(unit) if unit else (None, 0)
+        d = next((x for x in devices if x["id"] == dev_id), None)
+        out.append({"aux": n, "pool": n in aux_pool(), "fader": M.fader_label(use[n]) if n in use else "",
+                    "unit": (f"{d['name']} {ch}" if d and d["insCount"] > 1 else d["name"]) if d and n in use else "",
+                    "uinBusy": ", ".join(uin_users(st, n))})
+    return out
 
 
 def ref_label(devices, ref, side):
@@ -347,17 +401,49 @@ def route_output(dev_id, jack, source):
     return 200, {"ok": True, "msg": f"{M.src_label(source)} → User Out {r['n']} → {d['name']} Out {jack}"}
 
 
+pool_lock = threading.Lock()
+
+
+def free_pool_aux(n, st):
+    """Forget the unit on Aux n and switch its send jack off."""
+    unit = pool_assign().pop(str(n), None)
+    if not unit:
+        return
+    dev_id, ch = split_ref(unit)
+    d = get_dev(dev_id)
+    if not d:
+        return
+    sdev, sj = split_ref(d["io"].get(str(ch), {}).get("send"))
+    od = get_dev(sdev) if sdev else None
+    if od and od["outPort"] in M.BLOCK_OUT_PORTS and 1 <= sj <= od["outCount"]:
+        r = M.resolve_dev_output(od["outPort"], od["outStart"] + sj - 1, st)
+        if r["kind"] == "UOUT" and r.get("src") == 200 + n:
+            X.set(M.p_uout(r["n"]), 0)
+
+
 def route_insert(fader, dev_id, slot):
     """Empty dev_id = remove insert."""
     if fader not in M.FADERS:
         return 400, {"error": "Bad fader"}
     if not dev_id:
-        X.set(M.p_ins_on(fader), 0)
-        X.set(M.p_ins_sel(fader), 0)
-        return 200, {"ok": True, "msg": f"{M.fader_label(fader)} insert removed"}
+        with pool_lock:
+            st = X.snapshot()
+            t, n = M.ins_from_value(st.get(M.p_ins_sel(fader)))
+            X.set(M.p_ins_on(fader), 0)
+            X.set(M.p_ins_sel(fader), 0)
+            note = ""
+            if t == "AUX" and str(n) in pool_assign():
+                free_pool_aux(n, st)
+                with cfg_lock:
+                    save_cfg(CFG)
+                note = f" · Aux {n} is free again"
+        return 200, {"ok": True, "msg": f"{M.fader_label(fader)} insert removed{note}"}
     d = get_dev(dev_id)
     if not d or d["kind"] != "insert" or not (1 <= slot <= d["insCount"]):
         return 400, {"error": "Bad insert slot"}
+    if d["insType"] == "POOL":
+        with pool_lock:
+            return route_pool_insert(fader, d, slot)
     v = M.ins_value(d["insType"], d["insStart"] + slot - 1)
     X.set(M.p_ins_sel(fader), v)
     X.set(M.p_ins_on(fader), 1)
@@ -371,6 +457,74 @@ def route_insert(fader, dev_id, slot):
         if fi["insertOk"] is False:
             notes.append(f"Warning: FX{rack} has {fi['type']} loaded (send-type effect). Load an insert-type effect.")
     return 200, {"ok": True, "msg": " · ".join([msg] + notes), "warn": any(n.startswith("Warning") for n in notes)}
+
+
+def route_pool_insert(fader, d, ch):
+    """Insert an outboard unit: pick a free Aux, route its send and return, set the insert."""
+    st = X.snapshot()
+    unit = f"{d['id']}:{ch}"
+    uname = f"{d['name']} {ch}" if d["insCount"] > 1 else d["name"]
+    io = d["io"].get(str(ch), {})
+    sdev, sj = split_ref(io.get("send"))
+    rdev, rj = split_ref(io.get("ret"))
+    od = get_dev(sdev) if sdev else None
+    idev = get_dev(rdev) if rdev else None
+    if not (od and od["outPort"] in M.BLOCK_OUT_PORTS and 1 <= sj <= od["outCount"]):
+        return 409, {"error": f"{uname}: set its send jack (an AES50 or Card output) on the Devices tab."}
+    if M.resolve_dev_output(od["outPort"], od["outStart"] + sj - 1, st)["kind"] != "UOUT":
+        return 409, {"error": f"{uname}: the send jack {od['name']} Out {sj} is not fed by a User Out block (Blocks tab)."}
+    if not (idev and 1 <= rj <= idev["inCount"]):
+        return 409, {"error": f"{uname}: set its return jack (a stage box input) on the Devices tab."}
+
+    assign, use, pool = pool_assign(), aux_in_use(st), aux_pool()
+    for k, u in assign.items():
+        if u == unit and int(k) in use and use[int(k)] != fader:
+            return 409, {"error": f"{uname} is already inserted on {M.fader_label(use[int(k)])}. Remove it there first."}
+    t, cur = M.ins_from_value(st.get(M.p_ins_sel(fader)))
+    cur = cur if t == "AUX" and st.get(M.p_ins_on(fader)) else 0
+    prev = next((int(k) for k, u in assign.items() if u == unit), 0)
+    order = [n for n in [cur, prev] + pool if n]
+    reasons, n = [], 0
+    for cand in dict.fromkeys(order):
+        if cand not in pool:
+            continue
+        if cand in use and use[cand] != fader:
+            reasons.append(f"Aux {cand} on {M.fader_label(use[cand])}")
+            continue
+        busy = uin_users(st, cand)
+        if busy:
+            reasons.append(f"Aux {cand} return needs User In {cand} (used by {', '.join(busy)})")
+            continue
+        n = cand
+        break
+    if not n:
+        return 409, {"error": "No free Aux for an insert. " + ("; ".join(dict.fromkeys(reasons)) or "The Aux pool is empty (Devices tab).")}
+
+    notes = []
+    if cur and cur != n and str(cur) in assign:
+        free_pool_aux(cur, st)
+    if prev and prev != n:
+        assign.pop(str(prev), None)
+    if assign.get(str(n)) not in (None, unit):
+        free_pool_aux(n, st)
+    want = M.AUX_BLOCK_OPTS.index(("UIN", 6))
+    av = st.get(M.p_in_block("AUX"))
+    kind, c = M.AUX_BLOCK_OPTS[av] if av is not None and 0 <= av < len(M.AUX_BLOCK_OPTS) else ("?", 0)
+    if not (kind == "UIN" and n <= c):
+        X.set(M.p_in_block("AUX"), want)
+        notes.append("Aux In block set to User In 1-6")
+    code, res = route_output(od["id"], sj, 200 + n)
+    if code != 200:
+        return code, res
+    X.set(M.p_uin(n), M.src_value(idev["inPort"], idev["inStart"] + rj - 1))
+    X.set(M.p_ins_sel(fader), M.ins_value("AUX", n))
+    X.set(M.p_ins_on(fader), 1)
+    assign[str(n)] = unit
+    with cfg_lock:
+        save_cfg(CFG)
+    msg = (f"{uname} inserted on {M.fader_label(fader)} using Aux {n} "
+           f"(send → {od['name']} Out {sj}, return ← {idev['name']} In {rj})")
+    return 200, {"ok": True, "msg": " · ".join([msg] + notes), "aux": n}
 
 
 def route_outboard_io(d, slot):
@@ -419,20 +573,30 @@ def route_outboard_io(d, slot):
 
 
 def route_fxinsert(fader):
-    """Put the first free insert slot on the fader."""
+    """Put the first free insert (unit or slot) on the fader."""
     if fader not in M.FADERS:
         return 400, {"error": "Bad fader"}
     st = X.snapshot()
     if st.get(M.p_ins_sel(fader)) and st.get(M.p_ins_on(fader)):
         return 409, {"error": f"{M.fader_label(fader)} already has an insert ({M.ins_label(st.get(M.p_ins_sel(fader)))}). Remove it first."}
     used = {st.get(M.p_ins_sel(f)) for f in M.FADERS if st.get(M.p_ins_on(f))}
+    use = aux_in_use(st)
+    busy_units = {u for k, u in pool_assign().items() if int(k) in use}
+    last_err = None
     for d in (dev_defaults(x) for x in CFG["devices"]):
         if d["kind"] != "insert":
             continue
         for s in range(1, d["insCount"] + 1):
-            if M.ins_value(d["insType"], d["insStart"] + s - 1) not in used:
+            if d["insType"] == "POOL":
+                if f"{d['id']}:{s}" in busy_units:
+                    continue
+                code, res = route_insert(fader, d["id"], s)
+                if code == 200:
+                    return code, res
+                last_err = (code, res)
+            elif M.ins_value(d["insType"], d["insStart"] + s - 1) not in used:
                 return route_insert(fader, d["id"], s)
-    return 409, {"error": "No free insert slot. Add an insert device or remove an insert."}
+    return last_err or (409, {"error": "No free insert. Add an insert device or remove an insert."})
 
 
 # ---------- HTTP ----------
@@ -452,6 +616,38 @@ class H(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.end_headers()
         self.wfile.write(b)
+
+    def _reply(self, code, res):
+        """Action reply. On success it carries the new state, so the page needs no second request."""
+        if code == 200:
+            res = {**res, "state": build_state()}
+        return self._json(code, res)
+
+    def _events(self):
+        """Server-Sent Events: push the full state each time it changes."""
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Accel-Buffering", "no")  # nginx: do not buffer
+        self.end_headers()
+        last_v, last_conn, last_ping = -1, None, 0.0
+        try:
+            while True:
+                with X.changed:
+                    X.changed.wait_for(lambda: X.version != last_v, timeout=2)
+                now = time.time()
+                if X.version != last_v or X.connected != last_conn:
+                    time.sleep(0.03)  # merge bursts (e.g. a full re-read)
+                    last_v, last_conn = X.version, X.connected
+                    self.wfile.write(b"data: " + json.dumps(build_state()).encode() + b"\n\n")
+                    self.wfile.flush()
+                    last_ping = now
+                elif now - last_ping > 15:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    last_ping = now
+        except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError, OSError):
+            return
 
     def _authed(self):
         for part in self.headers.get("Cookie", "").split(";"):
@@ -485,6 +681,15 @@ class H(BaseHTTPRequestHandler):
                 return self._json(401, {"error": "Login required"})
             if path == "/api/state":
                 return self._json(200, build_state())
+            if path == "/api/events":
+                return self._events()
+            if path == "/api/relay":
+                return self._json(200, RELAY.status())
+            if path == "/api/discover":
+                found = discover()
+                if MOCK and not found:
+                    found = [{"ip": "127.0.0.1", "name": "Mock console", "model": "X32", "fw": "4.06"}]
+                return self._json(200, {"consoles": found})
             if path == "/api/meta":
                 return self._json(200, STATIC_META)
             return self._json(404, {"error": "Not found"})
@@ -530,24 +735,27 @@ class H(BaseHTTPRequestHandler):
                 with cfg_lock:
                     if "devices" in body and isinstance(body["devices"], list):
                         CFG["devices"] = [clean_device(d) for d in body["devices"][:32] if isinstance(d, dict)]
+                    if "auxPool" in body and isinstance(body["auxPool"], list):
+                        CFG["auxPool"] = sorted({int(n) for n in body["auxPool"] if str(n).isdigit() and 1 <= int(n) <= M.AUX_COUNT})
                     if "x32Ip" in body:
                         ip = str(body["x32Ip"]).strip()[:64]
                         CFG["x32Ip"] = ip
                         X.set_ip(ip)
                     save_cfg(CFG)
-                return self._json(200, {"ok": True})
+                X.bump()
+                return self._reply(200, {"ok": True})
             if path == "/api/route/input":
                 code, res = route_input(str(body.get("fader")), str(body.get("device") or ""),int(body.get("jack", 0)))
-                return self._json(code, res)
+                return self._reply(code, res)
             if path == "/api/route/output":
                 code, res = route_output(str(body.get("device")), int(body.get("jack", 0)), int(body.get("source", -1)))
-                return self._json(code, res)
+                return self._reply(code, res)
             if path == "/api/route/fxinsert":
                 code, res = route_fxinsert(str(body.get("fader")))
-                return self._json(code, res)
+                return self._reply(code, res)
             if path == "/api/route/insert":
                 code, res = route_insert(str(body.get("fader")), str(body.get("device") or ""), int(body.get("slot", 0)))
-                return self._json(code, res)
+                return self._reply(code, res)
             if path == "/api/block":
                 p, v = str(body.get("path")), int(body.get("value", -1))
                 if p not in ALLOWED_BLOCKS:
@@ -557,10 +765,27 @@ class H(BaseHTTPRequestHandler):
                 if not (0 <= v < limit):
                     return self._json(400, {"error": "Bad value"})
                 X.set(p, v)
-                return self._json(200, {"ok": True})
+                return self._reply(200, {"ok": True})
+            if path == "/api/relay":
+                with cfg_lock:
+                    rc = CFG.setdefault("relay", {"enabled": False, "name": "X32-Relay"})
+                    if "name" in body:
+                        rc["name"] = (str(body["name"]).strip() or "X32-Relay")[:24]
+                        RELAY.name = rc["name"]
+                    if "enabled" in body:
+                        rc["enabled"] = bool(body["enabled"])
+                    save_cfg(CFG)
+                if rc["enabled"] and not RELAY.running:
+                    RELAY.start()
+                elif not rc["enabled"] and RELAY.running:
+                    RELAY.stop()
+                st = RELAY.status()
+                if rc["enabled"] and not st["running"]:
+                    return self._json(500, {**st, "error": st["error"] or "Relay did not start"})
+                return self._json(200, st)
             if path == "/api/refresh":
                 X.refresh()
-                return self._json(200, {"ok": True})
+                return self._reply(200, {"ok": True})
         except (ValueError, TypeError):
             return self._json(400, {"error": "Bad request"})
         return self._json(404, {"error": "Not found"})

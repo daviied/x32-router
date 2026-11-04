@@ -90,6 +90,11 @@
         <select id="newPreset"></select>
         <button id="addDev" class="primary">Add device</button>
       </div>
+      <div class="card">
+        <b>Aux insert pool</b>
+        <p class="note">Auxes the app may use for outboard units (it picks a free one on each insert). Untick an Aux you use for something else. Each Aux N in use needs User In N for its return, so keep your channels off those User Ins.</p>
+        <div id="auxPool" class="row"></div>
+      </div>
       <div id="devList"></div>
       <div class="row"><button id="saveDevs" class="primary">Save devices</button></div>
     </section>
@@ -105,8 +110,18 @@
     <section id="tab-settings" class="tab hidden">
       <div class="card">
         <label>X32 IP address <input id="ip" placeholder="192.168.1.50" inputmode="decimal"></label>
-        <div class="row"><button id="saveIp" class="primary">Save</button><button id="refresh">Re-read X32</button></div>
+        <div class="row"><button id="saveIp" class="primary">Save</button><button id="discover">Find console</button><button id="refresh">Re-read X32</button></div>
+        <div id="found" class="row"></div>
         <p id="status"></p>
+      </div>
+      <div class="card" style="margin-top:12px">
+        <h2 style="margin-top:0">Relay for mixing apps</h2>
+        <p class="note">The Pi acts as the console for X32-Mix, Mixing Station, X32-Edit and other apps. The X32 talks only to the Pi. Point the apps at the Pi's IP (or use their console search). Turn it off to connect apps straight to the console again.</p>
+        <label class="chk"><input type="checkbox" id="relayOn"> Enable relay (UDP 10023 on the Pi)</label>
+        <label>Name shown in apps <input id="relayName" maxlength="24" placeholder="X32-Relay"></label>
+        <div class="row"><button id="relaySave" class="primary">Save relay</button></div>
+        <div id="relayStatus" class="note"></div>
+        <div id="relayClients" class="plan"></div>
       </div>
       <div class="row"><button id="logout">Log out</button></div>
     </section>

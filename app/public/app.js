@@ -15,11 +15,33 @@ async function api(path, body) {
     method: "POST", body: JSON.stringify(body),
     headers: { "Content-Type": "application/json", "X-Requested-With": "x32r" },
   };
-  const r = await fetch(path, opt);
-  const j = await r.json().catch(() => ({}));
-  if (r.status === 401 && path !== "/api/login") { showLogin(); throw new Error("Login required"); }
-  if (!r.ok) throw new Error(j.error || r.statusText);
-  return j;
+  document.body.classList.add("busy");
+  try {
+    const r = await fetch(path, opt);
+    const j = await r.json().catch(() => ({}));
+    if (r.status === 401 && path !== "/api/login") { showLogin(); throw new Error("Login required"); }
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    if (j.state) { applyState(j.state); delete j.state; }  // action replies carry the new state
+    return j;
+  } finally { document.body.classList.remove("busy"); }
+}
+
+let lastState = "";
+function applyState(s) {
+  const txt = typeof s === "string" ? s : JSON.stringify(s);
+  if (txt === lastState) return;  // nothing changed: skip redraw
+  lastState = txt;
+  S = typeof s === "string" ? JSON.parse(s) : s;
+  render();
+}
+
+// live updates: the server pushes state on every change (console or other users)
+let es = null;
+function openStream() {
+  if (es) es.close();
+  es = new EventSource("/api/events");
+  es.onmessage = (e) => applyState(e.data);
+  es.onerror = () => { /* browser reconnects; the slow poll below covers gaps */ };
 }
 
 function toast(msg, bad) {
@@ -29,7 +51,10 @@ function toast(msg, bad) {
 }
 
 // ---------- auth ----------
-function showLogin() { $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); clearInterval(timer); }
+function showLogin() {
+  $("#app").classList.add("hidden"); $("#login").classList.remove("hidden"); clearInterval(timer);
+  if (es) { es.close(); es = null; }
+}
 $("#loginForm").onsubmit = async (e) => {
   e.preventDefault();
   try { await api("/api/login", { password: $("#pw").value }); $("#pw").value = ""; start(); }
@@ -43,13 +68,15 @@ async function start() {
   const ps = $("#newPreset"); ps.innerHTML = "";
   for (const k of Object.keys(META.presets)) ps.append(new Option(META.presets[k].name + " preset", k));
   await poll();
+  openStream();
   clearInterval(timer);
-  timer = setInterval(() => { if (!document.hidden) poll(); }, 2000);
+  timer = setInterval(() => { if (!document.hidden) poll(); }, 15000);  // safety net only
 }
 
 async function poll() {
-  try { S = await api("/api/state"); render(); } catch (e) { /* keep last view */ }
+  try { applyState(await api("/api/state")); } catch (e) { /* keep last view */ }
 }
+document.addEventListener("visibilitychange", () => { if (!document.hidden && S) { poll(); if (!es || es.readyState === 2) openStream(); } });
 
 // ---------- tabs ----------
 $("#tabs").onclick = (e) => {
@@ -109,7 +136,7 @@ function renderClear() {
 $("#fxins").onclick = async () => {
   try {
     const r = await api("/api/route/fxinsert", { fader: selFader });
-    toast(r.msg, r.warn); await poll();
+    toast(r.msg, r.warn);
   } catch (e) { toast(e.message, true); }
 };
 $("#clear").onclick = async () => {
@@ -118,7 +145,7 @@ $("#clear").onclick = async () => {
     if (mode === "in") r = await api("/api/route/input", { fader: selFader });
     else if (mode === "ins") r = await api("/api/route/insert", { fader: selFader });
     else r = await api("/api/route/output", { device: selOut.dev, jack: selOut.jack, source: 0 });
-    toast(r.msg); await poll();
+    toast(r.msg);
   } catch (e) { toast(e.message, true); }
 };
 
@@ -208,41 +235,67 @@ async function doRouteIn(fid, dev, jack) {
     const r = await api("/api/route/input", { fader: fid, device: dev, jack });
     toast(r.msg);
     selFader = $("#advance").checked ? nextFader(fid, true) : null;
-    await poll();
+   
   } catch (e) { toast(e.message, true); }
 }
 
 // ---------- inserts ----------
+// insert point label for one slot / unit channel
+function insPoint(d, s, inf) {
+  const n = d.insStart + s - 1;
+  if (d.insType === "POOL") return inf && inf.aux ? `Aux ${inf.aux}` : "auto Aux";
+  return d.insType === "AUX" ? `Aux ${n}` : `FX${Math.ceil(n / 2)}${n % 2 ? "L" : "R"}`;
+}
+const unitName = (d, s) => lbl(d, "ins", s) || (d.insCount > 1 ? `${d.name} ${s}` : d.name);
+
+function slotButton(d, s, selF, pooled) {
+  const fs = (S.slots[d.id] || {})[s] || [];
+  const isSel = selSlot && selSlot.dev === d.id && selSlot.slot === s;
+  const inf = ((S.slotInfo || {})[d.id] || {})[s] || {};
+  const b = el("button", "slot" + (fs.length ? " used" : "") + (isSel ? " sel" : "") + (selF && fs.includes(selF.id) ? " hl" : "") + (inf.warn ? " warn" : ""));
+  const pair = el("span", "pair");
+  for (const lab of d.insType === "FX" ? ["In", "Out"] : ["Send", "Ret"]) { const x = el("span"); x.append(el("i"), lab); pair.append(x); }
+  const n = d.insStart + s - 1, point = insPoint(d, s, inf), L = lbl(d, "ins", s);
+  if (pooled) b.append(pair, el("span", "n", unitName(d, s)), el("span", "lbl", point), el("span", "tag", fs.map(shortFader).join(",")));
+  else b.append(pair, el("span", "n", `${s} · ${point}`), el("span", "lbl", L || inf.fx || ""), el("span", "tag", fs.map(shortFader).join(",")));
+  b.title = `${pooled ? unitName(d, s) : d.name + " " + s + (L ? " (" + L + ")" : "")} · insert point ${point}` +
+    (d.insType === "FX" ? `\nLoaded: ${inf.fx || "?"}`
+      : `\nSend: Aux Out${d.insType === "AUX" ? " " + n : ""}${inf.send ? " → " + inf.send : ""}\nReturn: Aux In${d.insType === "AUX" ? " " + n : ""}${inf.ret ? " ← " + inf.ret : ""}`) +
+    (inf.warn ? "\n⚠ " + inf.warn : "") + (fs.length ? `\nOn: ${fs.map(shortFader).join(", ")}` : "");
+  b.onclick = () => {
+    if (selFader) { doInsert(selFader, d.id, s); return; }
+    selSlot = isSel ? null : { dev: d.id, slot: s }; render();
+  };
+  return b;
+}
+
+function auxStrip() {
+  const box = el("div", "auxstrip");
+  for (const a of S.auxUse || []) {
+    const c = el("span", "auxchip" + (a.fader ? " on" : "") + (a.pool ? "" : " off"));
+    c.textContent = `Aux ${a.aux}: ${!a.pool ? "not in pool" : a.fader ? `${a.unit || "insert"} → ${a.fader}` : a.uinBusy ? `blocked (UIn ${a.aux} on ${a.uinBusy})` : "free"}`;
+    box.append(c);
+  }
+  return box;
+}
+
 function renderIns() {
   const bx = $("#boxesIns"); bx.innerHTML = "";
   const selF = fader(selFader);
   const list = devs("insert").filter((d) => d.insCount);
-  for (const d of list) {
-    const used = S.slots[d.id] || {};
-    const t = META.insTypes[d.insType];
-    const box = boxShell(d, `${t.name} ${d.insStart}-${d.insStart + d.insCount - 1}`);
-    const grid = box.querySelector(".jacks");
-    for (let s = 1; s <= d.insCount; s++) {
-      const fs = used[s] || [];
-      const isSel = selSlot && selSlot.dev === d.id && selSlot.slot === s;
-      const b = el("button", "slot" + (fs.length ? " used" : "") + (isSel ? " sel" : "") + (selF && fs.includes(selF.id) ? " hl" : ""));
-      const pair = el("span", "pair");
-      for (const lab of d.insType === "AUX" ? ["Send", "Ret"] : ["In", "Out"]) { const x = el("span"); x.append(el("i"), lab); pair.append(x); }
-      const n = d.insStart + s - 1;
-      const point = d.insType === "AUX" ? `Aux ${n}` : `FX${Math.ceil(n / 2)}${n % 2 ? "L" : "R"}`;
-      const L = lbl(d, "ins", s);
-      const inf = ((S.slotInfo || {})[d.id] || {})[s] || {};
-      if (inf.warn) b.classList.add("warn");
-      b.append(pair, el("span", "n", `${s} · ${point}`), el("span", "lbl", L || inf.fx || ""), el("span", "tag", fs.map(shortFader).join(",")));
-      b.title = `${d.name} ${s}${L ? " (" + L + ")" : ""} = insert point ${point}` +
-        (d.insType === "AUX" ? `\nSend: Aux Out ${n}${inf.send ? " → " + inf.send : ""}\nReturn: Aux In ${n}${inf.ret ? " ← " + inf.ret : ""}` : `\nLoaded: ${inf.fx || "?"}`) +
-        (inf.warn ? "\n⚠ " + inf.warn : "") + (fs.length ? `\nOn: ${fs.map(shortFader).join(", ")}` : "");
-      b.onclick = () => {
-        if (selFader) { doInsert(selFader, d.id, s); return; }
-        selSlot = isSel ? null : { dev: d.id, slot: s }; render();
-      };
-      grid.append(b);
-    }
+  const pool = list.filter((d) => d.insType === "POOL");
+  if (pool.length) {
+    const used = (S.auxUse || []).filter((a) => a.fader).length;
+    const box = boxShell({ name: "Outboard units", cols: 8 }, `${used} of ${(S.auxPool || []).length} Aux in use · the app picks the Aux`);
+    box.insertBefore(auxStrip(), box.querySelector(".jacks"));
+    const g = box.querySelector(".jacks");
+    for (const d of pool) for (let s = 1; s <= d.insCount; s++) g.append(slotButton(d, s, selF, true));
+    bx.append(box);
+  }
+  for (const d of list.filter((x) => x.insType !== "POOL")) {
+    const box = boxShell(d, `${META.insTypes[d.insType].name} ${d.insStart}-${d.insStart + d.insCount - 1}`);
+    const g = box.querySelector(".jacks");
+    for (let s = 1; s <= d.insCount; s++) g.append(slotButton(d, s, selF, false));
     bx.append(box);
   }
   if (!list.length) bx.append(el("p", "note", "No insert devices. Add an insert preset on the Devices tab."));
@@ -254,7 +307,7 @@ async function doInsert(fid, dev, slot) {
     const r = await api("/api/route/insert", { fader: fid, device: dev, slot });
     toast(r.msg, r.warn);
     selFader = $("#advance").checked ? nextFader(fid, false) : null;
-    await poll();
+   
   } catch (e) { toast(e.message, true); }
 }
 
@@ -323,7 +376,7 @@ async function doRouteOut(source) {
       const d = S.devices.find((x) => x.id === selOut.dev);
       selOut = d && selOut.jack < d.outCount ? { dev: d.id, jack: selOut.jack + 1 } : null;
     } else selOut = null;
-    await poll();
+   
   } catch (e) { toast(e.message, true); }
 }
 
@@ -407,15 +460,21 @@ function renderPatch() {
   P.append(prow("Aux insert", ax.map((f) => [`fins:${f.id}`, f.id.slice(3), `${fnm(f)} insert${f.ins ? " · " + f.ins : ""}`, "ins"])));
   const insDevs = devs("insert").filter((x) => x.insCount);
   if (insDevs.length) add("Insert devices");
+  const poolJacks = [];
   for (const d of insDevs) {
     const j = [];
     for (let s = 1; s <= d.insCount; s++) {
       const inf = ((S.slotInfo || {})[d.id] || {})[s] || {};
       const L = lbl(d, "ins", s);
-      j.push([`slot:${d.id}:${s}`, s, `${d.name} ${s}${L ? " (" + L + ")" : ""}${inf.fx ? " · " + inf.fx : ""}${inf.warn ? "\n⚠ " + inf.warn : ""}`, "ins" + (inf.warn ? " warn" : "")]);
+      if (d.insType === "POOL") {
+        poolJacks.push([`slot:${d.id}:${s}`, poolJacks.length + 1, `${unitName(d, s)} · ${insPoint(d, s, inf)}${inf.warn ? "\n⚠ " + inf.warn : ""}`, "ins" + (inf.warn ? " warn" : "")]);
+        continue;
+      }
+      j.push([`slot:${d.id}:${s}`, s, `${d.name} ${s}${L ? " (" + L + ")" : ""} · ${insPoint(d, s, inf)}${inf.fx ? " · " + inf.fx : ""}${inf.warn ? "\n⚠ " + inf.warn : ""}`, "ins" + (inf.warn ? " warn" : "")]);
     }
-    P.append(prow(d.name, j));
+    if (j.length) P.append(prow(d.name, j));
   }
+  if (poolJacks.length) P.append(prow("Outboard units", poolJacks));
   add("Output sources");
   P.append(prow("Main/Bus/Mtx", MIX_PATCH().map(([v, t]) => [`src:mix:${v}`, t.replace("Matrix ", "M").replace("Bus ", "B").replace("Main ", "").replace("Mono/C", "C"), `${t} (for Local Out / Aux Out jacks)`, "src"])));
   P.append(prow("Out patch", UO_PATCH().map(([v, t]) => [`src:uo:${v}`, t.replace("Output ", "").replace("P16 ", "P").replace("Aux Out ", "A").replace("Monitor ", "Mon"), `${t} (for AES50 / Card output jacks)`, "src"])));
@@ -500,7 +559,7 @@ async function connect(x, y) {
     } else throw new Error("Those two jacks can't be patched together.");
     toast(r.msg, r.warn);
   } catch (e) { toast(e.message, true); }
-  patchKey = ""; await poll();
+  patchKey = "";
 }
 
 async function unplugCable(c) {
@@ -511,7 +570,7 @@ async function unplugCable(c) {
     else { const B = parseId(c.b); r = await api("/api/route/output", { device: B.a, jack: B.b, source: 0 }); }
     toast("Unplugged: " + r.msg);
   } catch (e) { toast(e.message, true); }
-  patchKey = ""; await poll();
+  patchKey = "";
 }
 
 async function unplugJack(id) {
@@ -574,7 +633,7 @@ function blockSelect(b, opts) {
   for (const [v, t] of opts) s.append(new Option(t, v));
   s.value = b.value == null ? "" : String(b.value);
   s.onchange = async () => {
-    try { await api("/api/block", { path: b.path, value: Number(s.value) }); toast(`${b.label} → ${s.selectedOptions[0].text}`); poll(); }
+    try { await api("/api/block", { path: b.path, value: Number(s.value) }); toast(`${b.label} → ${s.selectedOptions[0].text}`); }
     catch (e) { toast(e.message, true); }
   };
   lab.append(s);
@@ -603,13 +662,19 @@ $("#allUin").onclick = async () => {
   const uinStart = META.inOpts.findIndex(([, t]) => t.startsWith("User In"));
   try {
     for (let i = 0; i < 4; i++) await api("/api/block", { path: S.blocks.in[i].path, value: uinStart + i });
-    toast("Ch 1-32 now use User In 1-32"); poll();
+    toast("Ch 1-32 now use User In 1-32");
   } catch (e) { toast(e.message, true); }
 };
 
 // ---------- devices ----------
 function renderDevices() {
   devDraft = JSON.parse(JSON.stringify(S.devices));
+  const ap = $("#auxPool"); ap.innerHTML = "";
+  for (let n = 1; n <= 6; n++) {
+    const l = el("label", "chk"), c = el("input");
+    c.type = "checkbox"; c.value = n; c.checked = (S.auxPool || []).includes(n);
+    l.append(c, `Aux ${n}`); ap.append(l);
+  }
   drawDevices();
 }
 
@@ -636,30 +701,31 @@ function drawDevices() {
         field("Jacks per row", num(d, "cols")),
       );
     } else {
-      c.append(
-        field("Insert point", sel(Object.keys(META.insTypes), d, "insType", (k) => `${META.insTypes[k].name} (${META.insTypes[k].count})`)),
-        field("First slot (Aux # / FX side #)", num(d, "insStart")),
-        field("Slot count", num(d, "insCount")),
-        field("Slots per row", num(d, "cols")),
-      );
-      const n = el("p", "note full", d.insType === "AUX"
-        ? "Slot = Aux Out (send) + Aux In (return) with the same number. Connect your outboard unit there."
-        : "Slots: 1 FX1L, 2 FX1R, 3 FX2L … 8 FX4R. Load an insert effect in that FX slot.");
+      const it = sel(Object.keys(META.insTypes), d, "insType", (k) => META.insTypes[k].name);
+      it.addEventListener("change", drawDevices);
+      c.append(field("Insert type", it));
+      if (d.insType === "POOL") c.append(field("Channels (mono units)", num(d, "insCount")));
+      else c.append(field("First slot (Aux # / FX side #)", num(d, "insStart")), field("Slot count", num(d, "insCount")), field("Slots per row", num(d, "cols")));
+      const n = el("p", "note full", {
+        POOL: "Each channel is one insertable unit. Set its send and return jacks below. When you insert it, the app picks a free Aux from the pool and routes everything.",
+        AUX: "Slot = Aux Out (send) + Aux In (return) with the same number. Connect your outboard unit there.",
+        FX: "Slots: 1 FX1L, 2 FX1R, 3 FX2L … 8 FX4R. Load an insert effect in that FX slot.",
+      }[d.insType]);
       c.append(n);
-      if (d.insType === "AUX") c.append(ioEditor(d));
+      if (d.insType !== "FX") c.append(ioEditor(d));
     }
     c.append(labelEditor(d));
     L.append(c);
   });
 }
 
-function jackOptions(side) {
-  // side "out": AES50/Card/Aux outputs; "in": any box input
-  const opts = [["", "Local Aux jack (no routing)"]];
+function jackOptions(side, pooled) {
+  // side "out": AES50/Card (+ Aux Out for fixed slots); "in": any box input
+  const opts = [["", pooled ? "(not set)" : "Local Aux jack (no routing)"]];
   for (const b of devDraft.filter((x) => (x.kind || "box") === "box")) {
     const port = side === "out" ? b.outPort : b.inPort;
     const cnt = side === "out" ? b.outCount : b.inCount;
-    if (!port || !cnt || (side === "out" && port === "XLR")) continue;
+    if (!port || !cnt || (side === "out" && (port === "XLR" || (pooled && port === "AUXOUT")))) continue;
     for (let j = 1; j <= cnt; j++) {
       const L = lbl(b, side, j);
       opts.push([`${b.id}:${j}`, `${b.name} ${side === "out" ? "Out" : "In"} ${j}${L ? " (" + L + ")" : ""}`]);
@@ -673,8 +739,11 @@ function ioEditor(d) {
   const det = el("details", "full labels");
   det.open = d._ioOpen !== false; det.ontoggle = () => (d._ioOpen = det.open);
   det.append(el("summary", null, "Outboard wiring (auto-routed on insert)"));
-  det.append(el("p", "note", "Where the unit is plugged in. When you insert a slot, the app routes Aux Out (send) to the output jack and the input jack to Aux In (return). Leave blank if the unit uses the X32 rear Aux jacks."));
-  const outs = jackOptions("out"), ins = jackOptions("in");
+  const pooled = d.insType === "POOL";
+  det.append(el("p", "note", pooled
+    ? "Where each unit is plugged in. Send = a stage box output (AES50/Card) that feeds the unit. Return = the stage box input the unit comes back on."
+    : "Where the unit is plugged in. When you insert a slot, the app routes Aux Out (send) to the output jack and the input jack to Aux In (return). Leave blank if the unit uses the X32 rear Aux jacks."));
+  const outs = jackOptions("out", pooled), ins = jackOptions("in", pooled);
   const g = el("div", "iogrid");
   for (let s = 1; s <= d.insCount; s++) {
     const io = (d.io[s] = d.io[s] || {});
@@ -685,7 +754,7 @@ function ioEditor(d) {
       x.value = io[k] || ""; x.onchange = () => (io[k] = x.value);
       return x;
     };
-    g.append(el("b", null, `${s} · Aux ${n}${lbl(d, "ins", s) ? " · " + lbl(d, "ins", s) : ""}`),
+    g.append(el("b", null, pooled ? `${s} · ${unitName(d, s)}` : `${s} · Aux ${n}${lbl(d, "ins", s) ? " · " + lbl(d, "ins", s) : ""}`),
       field("Send to (unit input)", mk(outs, "send")), field("Return from (unit output)", mk(ins, "ret")));
   }
   det.append(g);
@@ -728,8 +797,9 @@ $("#addDev").onclick = () => {
 };
 $("#saveDevs").onclick = async () => {
   try {
-    await api("/api/config", { devices: devDraft.map(({ _open, _ioOpen, ...d }) => d) });
-    toast("Devices saved"); devDraft = null; await poll();
+    const auxPool = [...document.querySelectorAll("#auxPool input:checked")].map((x) => Number(x.value));
+    await api("/api/config", { devices: devDraft.map(({ _open, _ioOpen, ...d }) => d), auxPool });
+    toast("Devices saved"); devDraft = null; render();
   }
   catch (e) { toast(e.message, true); }
 };
@@ -794,10 +864,9 @@ function renderPlan() {
     const used = S.slots[d.id] || {};
     const rows = [];
     for (let s = 1; s <= d.insCount; s++) {
-      const n = d.insStart + s - 1;
-      const point = d.insType === "AUX" ? `Aux ${n} (send Aux Out ${n} / return Aux In ${n})` : `FX${Math.ceil(n / 2)}${n % 2 ? "L" : "R"}`;
       const inf = ((S.slotInfo || {})[d.id] || {})[s] || {};
-      const wiring = d.insType === "AUX"
+      const point = insPoint(d, s, inf);
+      const wiring = d.insType !== "FX"
         ? [inf.send && "Send → " + inf.send, inf.ret && "Return ← " + inf.ret].filter(Boolean).join(" / ") || "Rear Aux jacks"
         : (inf.fx || "") + (inf.warn ? " ⚠ not an insert type" : "");
       rows.push([`Slot ${s}`, lbl(d, "ins", s), point, wiring, (used[s] || []).map(fname).join(", ")]);
@@ -814,8 +883,52 @@ function renderSettings() {
   const ip = $("#ip"); if (document.activeElement !== ip) ip.value = S.x32Ip || "";
   $("#status").textContent = S.mock ? "Mock mode (no mixer)." : S.connected ? `Connected: ${S.info}` : "Not connected. Check the IP address and network.";
 }
-$("#saveIp").onclick = async () => { try { await api("/api/config", { x32Ip: $("#ip").value }); toast("Saved"); poll(); } catch (e) { toast(e.message, true); } };
-$("#refresh").onclick = async () => { await api("/api/refresh", {}); toast("Reading X32…"); setTimeout(poll, 1500); };
+
+// ---------- relay ----------
+let relayTimer = null, relayLoaded = false;
+function drawRelay(r) {
+  if (!relayLoaded) { $("#relayOn").checked = r.running; $("#relayName").value = r.name; relayLoaded = true; }
+  const st = r.stats;
+  $("#relayStatus").textContent = r.running
+    ? `Running on UDP ${r.port}. ${r.clients.length} app(s). From apps ${st.fromApps} · to console ${st.toConsole} · cache hits ${st.cacheHits} · from console ${st.fromConsole} · to apps ${st.toApps}. Cached values ${r.cached}, shared streams ${r.subs}.`
+    : r.error ? `Off. ${r.error}` : "Off.";
+  const L = $("#relayClients"); L.innerHTML = "";
+  if (r.clients.length)
+    L.append(table(["App address", "Live updates", "Idle (s)", "Packets in", "Packets out"],
+      r.clients.map((c) => [c.addr, c.xremote ? "Yes" : "No", String(c.idle), String(c.rx), String(c.tx)])));
+}
+async function pollRelay() {
+  if (tab !== "settings" || document.hidden) return;
+  try { drawRelay(await api("/api/relay")); } catch (e) { /* ignore */ }
+}
+$("#relaySave").onclick = async () => {
+  try {
+    const r = await api("/api/relay", { enabled: $("#relayOn").checked, name: $("#relayName").value });
+    drawRelay(r); toast(r.running ? "Relay on" : "Relay off");
+  } catch (e) { toast(e.message, true); }
+};
+document.querySelector('#tabs [data-tab="settings"]').addEventListener("click", () => {
+  relayLoaded = false; setTimeout(pollRelay, 0);  // after the tab switch
+  clearInterval(relayTimer); relayTimer = setInterval(pollRelay, 2000);
+});
+$("#saveIp").onclick = async () => { try { await api("/api/config", { x32Ip: $("#ip").value }); toast("Saved"); } catch (e) { toast(e.message, true); } };
+$("#refresh").onclick = async () => { await api("/api/refresh", {}); toast("Reading X32…"); };
+$("#discover").onclick = async () => {
+  const L = $("#found"); L.innerHTML = ""; L.append(el("p", "note", "Searching the network…"));
+  try {
+    const { consoles } = await api("/api/discover");
+    L.innerHTML = "";
+    if (!consoles.length) L.append(el("p", "note", "No console found. Check that it is on, on the same network, and that the container uses host networking. You can still type the IP."));
+    for (const c of consoles) {
+      const b = el("button", null, `${c.model} "${c.name}" · ${c.ip} · fw ${c.fw}`);
+      b.onclick = async () => {
+        $("#ip").value = c.ip;
+        try { await api("/api/config", { x32Ip: c.ip }); toast(`Connecting to ${c.ip}`); } catch (e) { toast(e.message, true); }
+      };
+      L.append(b);
+    }
+  } catch (e) { L.innerHTML = ""; toast(e.message, true); }
+};
 
 // ---------- boot ----------
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
