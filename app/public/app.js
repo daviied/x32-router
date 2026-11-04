@@ -458,7 +458,6 @@ function renderPatch() {
   P.append(prow("Ch input", ch.map((f) => [`fin:${f.id}`, f.id.slice(2), `${fnm(f)} input · ${f.src}`, f.routable ? "" : "lock"])));
   P.append(prow("Aux input", ax.map((f) => [`fin:${f.id}`, f.id.slice(3), `${fnm(f)} input · ${f.src}`, f.routable ? "" : "lock"])));
   P.append(prow("Ch insert", ch.map((f) => [`fins:${f.id}`, f.id.slice(2), `${fnm(f)} insert${f.ins ? " · " + f.ins : ""}`, "ins"])));
-  P.append(prow("Aux insert", ax.map((f) => [`fins:${f.id}`, f.id.slice(3), `${fnm(f)} insert${f.ins ? " · " + f.ins : ""}`, "ins"])));
   const insDevs = devs("insert").filter((x) => x.insCount);
   if (insDevs.length) add("Insert devices");
   const poolJacks = [];
@@ -676,9 +675,9 @@ function renderBlocks() {
   }
   const det = el("details"); det.open = used.has("XLR");
   det.append(el("summary", null, "Local XLR outputs (blocks of 4)"));
-  det.append(el("p", "note", "At Output 1-4 … 13-16 (default), Local Out jacks take Main/Bus/Matrix sources on the Route tab. Set a block to User Out to send any signal there, e.g. an outboard unit's insert send. Pick User Outs that AES50/Card blocks do not use (e.g. User Out 45-48); the jacks keep their current signal."));
+  det.append(el("p", "note", "At Output 1-4 … 13-16 (default), Local Out jacks take Main/Bus/Matrix sources on the Route tab. Set a block to User Out to send any signal there, e.g. an outboard unit's insert send. Pick User Outs that AES50/Card blocks do not use (the highest are User Out 41-44 for blocks 1-4 and 9-12, User Out 45-48 for blocks 5-8 and 13-16). Empty User Outs get the jacks' current signal."));
   const g = el("div", "blockgrid");
-  for (const b of S.blocks.xlr || []) g.append(blockSelect(b, META.xlrOpts));
+  for (const b of S.blocks.xlr || []) g.append(blockSelect(b, META.xlrOpts[b.block]));
   det.append(g); ob.append(det);
   ob.append(el("p", "note", "Aux Out 1-6 are patched one by one on the Route tab. They need no blocks."));
 }

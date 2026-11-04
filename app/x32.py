@@ -94,7 +94,8 @@ class X32:
         s[x32map.p_in_block("AUX")] = 0
         for port in ("A", "B", "CARD"):
             for i, b in enumerate(x32map.out_blocks(port)):
-                s[x32map.p_out_block(port, b)] = 25 + min(i, 5) if port == "A" else 20
+                s[x32map.p_out_block(port, b)] = (
+                    x32map.OUT_BLOCK_OPTS.index(("UOUT", i * 8 + 1)) if port == "A" else 20)
         for i in range(1, 33):
             s[x32map.p_uin(i)] = x32map.src_value("A", i)
             s[x32map.p_ch_name(i)] = ""
@@ -107,7 +108,7 @@ class X32:
         for i in range(1, 7):
             s[x32map.p_local_out("AUXOUT", i)] = 0
         for i, b in enumerate(x32map.XLR_BLOCKS):
-            s[x32map.p_xlr_block(b)] = x32map.XLR_BLOCK_OPTS.index(("OUT", i * 4 + 1))
+            s[x32map.p_xlr_block(b)] = x32map.XLR_OPTS[b].index(("OUT", i * 4 + 1))
         for f in x32map.FADERS:
             s[x32map.p_ins_sel(f)] = 0
             s[x32map.p_ins_on(f)] = 0

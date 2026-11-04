@@ -225,8 +225,8 @@ class Relay:
         if addr == "/xinfo":
             return osc_encode("/xinfo", ip, self.name, model, fw)
         if addr == "/status":
-            return osc_encode("/status", "active", ip, self.name)
-        return osc_encode("/info", "V2.07", self.name, model, fw)
+            return osc_encode("/status", "active", ip, "osc-server")
+        return osc_encode("/info", "V2.07", "osc-server", model, fw)
 
     def _get(self, client, addr, data, now):
         with self.lock:

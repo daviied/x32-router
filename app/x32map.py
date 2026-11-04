@@ -105,7 +105,7 @@ def mix_label(v):
     if v <= 65:
         return f"Aux {v - 57} Direct"
     if v <= 73:
-        return f"FX {v - 65} Direct"
+        return f"FX{(v - 64) // 2}{'L' if v % 2 == 0 else 'R'} Direct"
     return {74: "Monitor L", 75: "Monitor R", 76: "Talkback"}.get(v, f"Value {v}")
 
 
@@ -155,13 +155,16 @@ def ins_label(v):
 # ---- FX rack types: /fx/1..8/type ----
 # FX1-4: values 0-26 are reverb / delay / modulation types (normally send FX),
 # values 27+ are channel-processor types that work as inserts.
-# FX5-8 hold insert types only; their list starts at GEQ2 (value 0 = FX_TYPES[27]).
+# FX5-8 hold insert types only and have their own list (FX5_TYPES).
 FX_TYPES = ["HALL", "AMBI", "RPLT", "ROOM", "CHAM", "PLAT", "VREV", "VRM", "GATE", "RVRS", "DLY", "3TAP",
             "4TAP", "CRS", "FLNG", "PHAS", "DIMC", "FILT", "ROTA", "PAN", "SUB", "D/RV", "CR/R", "FL/R",
             "D/CR", "D/FL", "MODD", "GEQ2", "GEQ", "TEQ2", "TEQ", "DES2", "DES", "P1A", "P1A2", "PQ5",
             "PQ5S", "WAVD", "LIM", "CMB", "CMB2", "FAC", "FAC1M", "FAC2", "LEC", "LEC2", "ULC", "ULC2",
             "ENH2", "ENH", "EXC2", "EXC", "IMG", "EDI", "SON", "AMP2", "AMP", "DRV2", "DRV", "PIT2", "PIT"]
 FX_FIRST_INSERT = 27
+FX5_TYPES = ["GEQ2", "GEQ", "TEQ2", "TEQ", "DES2", "DES", "P1A", "P1A2", "PQ5", "PQ5S", "WAVD", "LIM", "FAC",
+             "FAC1M", "FAC2", "LEC", "LEC2", "ULC", "ULC2", "ENH2", "ENH", "EXC2", "EXC", "IMG", "EDI", "SON",
+             "AMP2", "AMP", "DRV2", "DRV", "PHAS", "FILT", "PAN", "SUB"]
 
 
 def p_fx_type(rack):
@@ -172,8 +175,7 @@ def fx_type_info(v, rack=1):
     if v is None:
         return {"type": "?", "insertOk": None}
     if rack >= 5:
-        i = FX_FIRST_INSERT + v
-        return {"type": FX_TYPES[i] if 0 <= i < len(FX_TYPES) else f"Type {v}", "insertOk": True}
+        return {"type": FX5_TYPES[v] if 0 <= v < len(FX5_TYPES) else f"Type {v}", "insertOk": True}
     name = FX_TYPES[v] if 0 <= v < len(FX_TYPES) else f"Type {v}"
     return {"type": name, "insertOk": v >= FX_FIRST_INSERT}
 
@@ -230,18 +232,20 @@ def aux_block_options():
 
 
 # ---- Output blocks: /config/routing/AES50A|AES50B|CARD/<block> ----
-OUT_BLOCK_OPTS = []
-for i in range(4):
-    OUT_BLOCK_OPTS.append(("LOCAL", i * 8 + 1))
-for i in range(6):
-    OUT_BLOCK_OPTS.append(("A", i * 8 + 1))
-for i in range(6):
-    OUT_BLOCK_OPTS.append(("B", i * 8 + 1))
-for i in range(4):
-    OUT_BLOCK_OPTS.append(("CARD", i * 8 + 1))
-OUT_BLOCK_OPTS += [("OUT", 1), ("OUT", 9), ("P16", 1), ("P16", 9), ("AUXMON", 1)]
-for i in range(6):
-    OUT_BLOCK_OPTS.append(("UOUT", i * 8 + 1))
+# Value list from the Unofficial X32/M32 OSC Protocol (FW 4.0+): 36 values, 0-35.
+def _out_list(first):
+    """AES50/Card (first 1) or XLR Out (first 1 or 5) value list. Entries are 8 apart in both."""
+    step = 8
+    out = []
+    for kind, count in (("LOCAL", 4), ("A", 6), ("B", 6), ("CARD", 4), ("OUT", 2), ("P16", 2)):
+        out += [(kind, first + i * step) for i in range(count)]
+    out += [("AUXMON", first), ("AUXIN", first)]
+    out += [("UOUT", first + i * step) for i in range(6)]
+    out += [("UIN", first + i * step) for i in range(4)]
+    return out
+
+
+OUT_BLOCK_OPTS = _out_list(1)
 
 OUT_PORT_PATH = {"A": "AES50A", "B": "AES50B", "CARD": "CARD"}
 
@@ -257,6 +261,8 @@ def out_block_label(k, s):
         return f"P16 {s}-{s + 7}"
     if k == "AUXMON":
         return "Aux Out 1-6 / Mon"
+    if k == "AUXIN":
+        return "Aux In 1-6 / TB"
     return f"{kind_name(k)} {s}-{s + 7}"
 
 
@@ -271,30 +277,32 @@ def out_block_slot_label(k, n):
         return f"P16 {n}"
     if k == "AUXMON":
         return f"Aux Out {n}" if n <= 6 else ("Monitor L" if n == 7 else "Monitor R")
+    if k == "AUXIN":
+        return f"Aux In {n}" if n <= 6 else "Talkback"
     if k == "UOUT":
         return f"User Out {n}"
+    if k == "UIN":
+        return f"User In {n}"
     return f"{PORT_NAMES[k]} {n}"
 
 
 # ---- Local XLR Out blocks of 4: /config/routing/OUT/<block> ----
-# Order inferred from the 8-wide AES50/Card list (community docs). Check with X32-Edit:
-# a console at default should show "Output 1-4" ... "Output 13-16" here.
-XLR_BLOCK_OPTS = []
-for _k, _n in (("LOCAL", 32), ("A", 48), ("B", 48), ("CARD", 32), ("OUT", 16), ("P16", 16)):
-    XLR_BLOCK_OPTS += [(_k, i * 4 + 1) for i in range(_n // 4)]
-XLR_BLOCK_OPTS += [("AUXMON", 1), ("AUXMON", 5)]
-XLR_BLOCK_OPTS += [("UOUT", i * 4 + 1) for i in range(12)]
+# Two lists (values 0-35): blocks 1-4 and 9-12 offer ranges 1-4, 9-12, 17-20 ...;
+# blocks 5-8 and 13-16 offer ranges 5-8, 13-16, 21-24 ...
 XLR_BLOCKS = ["1-4", "5-8", "9-12", "13-16"]
+XLR_OPTS = {b: _out_list(1 if b in ("1-4", "9-12") else 5) for b in XLR_BLOCKS}
 
 
 def xlr_block_label(k, s):
     if k == "AUXMON":
         return "Aux Out 1-4" if s == 1 else "Aux Out 5-6 / Mon"
-    return out_block_label(k, s).rsplit(" ", 1)[0] + f" {s}-{s + 3}"
+    if k == "AUXIN":
+        return "Aux In 1-4" if s == 1 else "Aux In 5-6 / TB"
+    return f"{'Output' if k == 'OUT' else 'P16' if k == 'P16' else kind_name(k)} {s}-{s + 3}"
 
 
 def xlr_block_options():
-    return [[i, xlr_block_label(k, s)] for i, (k, s) in enumerate(XLR_BLOCK_OPTS)]
+    return {b: [[i, xlr_block_label(k, s)] for i, (k, s) in enumerate(o)] for b, o in XLR_OPTS.items()}
 
 
 def p_xlr_block(b):
@@ -328,6 +336,7 @@ def p_aux_name(n):
 
 # ---- Faders ----
 FADERS = [f"ch{i}" for i in range(1, 33)] + [f"aux{i}" for i in range(1, 9)]
+INS_FADERS = FADERS[:32]  # Aux In channels have no insert point on the X32
 
 
 def fader_label(f):
@@ -345,7 +354,7 @@ def all_read_paths():
     paths += [p_aux_name(i) for i in range(1, 9)]
     for port in LOCAL_OUT_PORTS:
         paths += [p_local_out(port, i) for i in range(1, PORT_SIZE[port] + 1)]
-    for f in FADERS:
+    for f in INS_FADERS:
         paths += [p_ins_sel(f), p_ins_on(f)]
     paths += [p_fx_type(r) for r in range(1, 9)]
     return paths
@@ -383,9 +392,10 @@ def resolve_fader(f, st):
 def resolve_dev_output(port, m, st):
     """What feeds physical output m on a port."""
     if port == "XLR":
-        bv = st.get(p_xlr_block(XLR_BLOCKS[(m - 1) // 4]))
-        if bv is not None and 0 <= bv < len(XLR_BLOCK_OPTS):
-            kind, s = XLR_BLOCK_OPTS[bv]
+        xb = XLR_BLOCKS[(m - 1) // 4]
+        bv = st.get(p_xlr_block(xb))
+        if bv is not None and 0 <= bv < len(XLR_OPTS[xb]):
+            kind, s = XLR_OPTS[xb][bv]
             n = s + (m - 1) % 4
             if kind == "UOUT":
                 uv = st.get(p_uout(n))

@@ -5,7 +5,7 @@ Web app (PWA) for patching an X32 by stage box jack. Runs in Docker on a Raspber
 ## How it works
 
 1. **Devices tab**: add devices from presets: S16, S32, Card, X32 Local (Local In 1-32 + XLR Out 1-16), X32 Aux I/O (Aux In/Out 1-6), Outboard insert, Internal FX insert, or Custom. Set which port range each uses, e.g. S32 inputs = AES50-A 17-48. Open **Port labels** to name each jack (e.g. "Kick In", "Wedge 1").
-2. **Blocks tab**: set fader blocks in groups of 8, e.g. Ch 1-8 = User In 9-16. Use **User In** blocks for channels and **User Out** blocks for AES50/Card outputs. Local XLR Outs are in blocks of 4. At "Output 1-4" … (default) they take Main/Bus/Matrix sources. Set a block to User Out to send an outboard insert send there. Use User Outs that AES50/Card blocks do not use (e.g. User Out 45-48). The app copies the current Output signals into those User Outs, so the other jacks keep their signal.
+2. **Blocks tab**: set fader blocks in groups of 8, e.g. Ch 1-8 = User In 9-16. Use **User In** blocks for channels and **User Out** blocks for AES50/Card outputs. Local XLR Outs are in blocks of 4. At "Output 1-4" … (default) they take Main/Bus/Matrix sources. Set a block to User Out to send an outboard insert send there. Use User Outs that AES50/Card blocks do not use (blocks 1-4 and 9-12 offer User Out 1-4, 9-12 … 41-44; blocks 5-8 and 13-16 offer User Out 5-8, 13-16 … 45-48). The app copies the current Output signals into any of those User Outs that are empty.
 3. **Route tab → Inputs**: click a fader, then a stage box jack (or jack first). Example: Ch 1 → S32 In 2. Ch 1 uses User In 9, S32 In 2 is AES50-A 18, so the app sets User In 9 = AES50-A 18. **Unassign input** sets the fader's User In to Off.
 4. **Route tab → Outputs**: click an output, then a source.
    - AES50/Card outputs: Output 1-16, P16, Aux, Monitor, or any input (through User Out).
@@ -68,11 +68,10 @@ cd app && APP_PASSWORD=test X32_MOCK=1 DATA_DIR=../data python server.py
 ## Notes
 
 - Config is saved in `/data/config.json`.
-- All X32 OSC value tables are in `app/x32map.py`. The **Aux In block** and **output block** value lists are from community docs; check them against X32-Edit on first use. If a label is wrong, fix the table there.
+- All X32 OSC value tables are in `app/x32map.py`. If a label is wrong, fix the table there.
 - Aux 7-8 are USB L/R and cannot be routed.
 - Local XLR outs follow the main output patch only if Routing → XLR Out is at the default (Out 1-4 … Out 13-16).
-- The FX type list (`/fx/N/type`) and which types count as insert types are from community docs.
-- The XLR Out block values (`/config/routing/OUT/1-4` …) are inferred from the AES50 block list. A console at default must show "Output 1-4" … "Output 13-16" on the Blocks tab. If not, fix `XLR_BLOCK_OPTS` in `app/x32map.py`.
+- Routing, insert and FX value lists follow the Unofficial X32/M32 OSC Remote Protocol (v4.06, FW 4.0+). The doc names the 4-wide `AUX/CR` and `AUX/TB` values but not their contents; the labels here are inferred.
 - Outboard units on local Aux Out N assume the Aux Out N jack carries the Aux N insert send.
 - Outboard return routing assumes Aux In block "User In 1-x" feeds Aux N from User In N.
-- The local out source list and insert values (`/outputs/main/NN/src`, `/insert/sel`) are also from community docs. Check them on first use.
+- Aux In channels have no insert point on the X32; only Ch 1-32 can take an insert.

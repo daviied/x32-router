@@ -292,7 +292,7 @@ def build_state():
         "aux": {"path": M.p_in_block("AUX"), "label": "Aux 1-6", "value": st.get(M.p_in_block("AUX"))},
         "out": {port: [{"path": M.p_out_block(port, b), "label": f"{M.PORT_NAMES[port]} Out {b}",
                         "value": st.get(M.p_out_block(port, b))} for b in M.out_blocks(port)] for port in M.BLOCK_OUT_PORTS},
-        "xlr": [{"path": M.p_xlr_block(b), "label": f"XLR Out {b}", "value": st.get(M.p_xlr_block(b))} for b in M.XLR_BLOCKS],
+        "xlr": [{"path": M.p_xlr_block(b), "label": f"XLR Out {b}", "block": b, "value": st.get(M.p_xlr_block(b))} for b in M.XLR_BLOCKS],
     }
     slot_info = {}
     for d in devices:
@@ -459,6 +459,8 @@ def route_insert(fader, dev_id, slot):
     """Empty dev_id = remove insert."""
     if fader not in M.FADERS:
         return 400, {"error": "Bad fader"}
+    if fader not in M.INS_FADERS:
+        return 409, {"error": "Aux In channels have no insert point on the X32."}
     if not dev_id:
         with pool_lock:
             st = X.snapshot()
@@ -624,6 +626,8 @@ def route_fxinsert(fader):
     """Put the first free insert (unit or slot) on the fader."""
     if fader not in M.FADERS:
         return 400, {"error": "Bad fader"}
+    if fader not in M.INS_FADERS:
+        return 409, {"error": "Aux In channels have no insert point on the X32."}
     st = X.snapshot()
     if st.get(M.p_ins_sel(fader)) and st.get(M.p_ins_on(fader)):
         return 409, {"error": f"{M.fader_label(fader)} already has an insert ({M.ins_label(st.get(M.p_ins_sel(fader)))}). Remove it first."}
@@ -810,15 +814,16 @@ class H(BaseHTTPRequestHandler):
                     return self._json(400, {"error": "Bad block"})
                 limit = len(M.AUX_BLOCK_OPTS) if p.endswith("/AUX") else (
                     len(M.IN_BLOCK_OPTS) if "/IN/" in p else
-                    len(M.XLR_BLOCK_OPTS) if "/OUT/" in p else len(M.OUT_BLOCK_OPTS))
+                    len(M.OUT_BLOCK_OPTS))  # AES50, Card and XLR Out lists all have 36 values
                 if not (0 <= v < limit):
                     return self._json(400, {"error": "Bad value"})
                 old = X.snapshot().get(p)
                 X.set(p, v)
                 note = ""
-                if "/OUT/" in p and old is not None and 0 <= old < len(M.XLR_BLOCK_OPTS):
+                xo = M.XLR_OPTS.get(p.rsplit("/", 1)[1]) if "/OUT/" in p else None
+                if xo and old is not None and 0 <= old < len(xo):
                     # XLR block Output x -> User Out y: keep the jacks' signal in empty User Outs
-                    (ok_, os_), (nk, ns) = M.XLR_BLOCK_OPTS[old], M.XLR_BLOCK_OPTS[v]
+                    (ok_, os_), (nk, ns) = xo[old], xo[v]
                     if ok_ == "OUT" and nk == "UOUT":
                         st, kept = X.snapshot(), 0
                         for i in range(4):
